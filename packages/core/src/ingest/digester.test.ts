@@ -98,9 +98,10 @@ describe('memoryIdForSession', () => {
 describe('estimateCost', () => {
     it('computes standard and 50% batch pricing per model', () => {
         const estimates = estimateCost(1_000_000, 0);
-        const flash = estimates.find((estimate) => estimate.model === 'gemini-3.6-flash')!;
-        expect(flash.standardUsd).toBeCloseTo(DIGEST_MODELS['gemini-3.6-flash'].inputUsdPerMTok, 2);
-        expect(flash.batchUsd).toBeCloseTo(flash.standardUsd / 2, 2);
+        const flash = estimates.find((estimate) => estimate.model === 'gemini-3.5-flash-lite')!;
+        expect(flash.standardUsd).toBeCloseTo(DIGEST_MODELS['gemini-3.5-flash-lite'].inputUsdPerMTok, 2);
+        // batchUsd is rounded independently of standardUsd / 2
+        expect(flash.batchUsd).toBeCloseTo(Number((flash.standardUsd / 2).toFixed(2)), 2);
         expect(estimates).toHaveLength(Object.keys(DIGEST_MODELS).length);
     });
 });
@@ -121,7 +122,7 @@ describe('buildDigestPrompt', () => {
 });
 
 describe('SessionDigester', () => {
-    it('defaults to the frontier model and rejects unknown models', () => {
+    it('defaults to gemini-3.5-flash-lite and rejects unknown models', () => {
         expect(new SessionDigester({ apiKey: 'k' }).model).toBe(DEFAULT_DIGEST_MODEL);
         expect(() => new SessionDigester({ apiKey: 'k', model: 'gemini-1.5-pro' }))
             .toThrow(/Unsupported digest model/);

@@ -105,14 +105,14 @@ describe('IngestLedgerStore', () => {
             mtimeMs: 1,
             size: 2,
             memoryId: 'chat:claude:a',
-            model: 'gemini-3.6-flash',
+            model: 'gemini-3.5-flash-lite',
             ingestedAt: 3,
         });
         expect(ledger.getEntry('/a.jsonl')?.memoryId).toBe('chat:claude:a');
 
         ledger.setPendingBatch({
             jobName: 'batches/123',
-            model: 'gemini-3.6-flash',
+            model: 'gemini-3.5-flash-lite',
             submittedAt: 4,
             requests: {},
         });

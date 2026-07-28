@@ -193,14 +193,14 @@ test("POST /ingest/start kicks off a new-sessions-only run and /ingest/status re
     const res = await authed(`${base}/ingest/start`, {
         method: "POST",
         // A legacy client may still send newOnly:false; the sidecar must ignore it.
-        body: JSON.stringify({ sources: [{ source: "factory" }], model: "gemini-2.5-flash", mode: "batch", newOnly: false }),
+        body: JSON.stringify({ sources: [{ source: "factory" }], model: "gemini-3.5-flash-lite", mode: "batch", newOnly: false }),
     });
     assert.equal(res.status, 200);
     assert.deepEqual(await res.json(), { started: true });
     // run() is fired asynchronously; give it a tick.
     await new Promise((resolve) => setTimeout(resolve, 10));
     const runOptions = calls.runs.at(-1) as Record<string, unknown>;
-    assert.equal(runOptions.model, "gemini-2.5-flash");
+    assert.equal(runOptions.model, "gemini-3.5-flash-lite");
     assert.equal(runOptions.mode, "batch");
     assert.equal("newOnly" in runOptions, false);
 

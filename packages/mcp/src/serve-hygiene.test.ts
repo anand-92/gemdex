@@ -161,14 +161,14 @@ test("POST /hygiene/scan delegates to the manager with the store and threshold",
 test("POST /hygiene/start kicks off a run and /hygiene/status reports it", async () => {
     const res = await authed(`${base}/hygiene/start`, {
         method: "POST",
-        body: JSON.stringify({ model: "gemini-2.5-flash", threshold: 0.8 }),
+        body: JSON.stringify({ model: "gemini-3.5-flash-lite", threshold: 0.8 }),
     });
     assert.equal(res.status, 200);
     assert.deepEqual(await res.json(), { started: true });
     // run() is fired asynchronously; give it a tick.
     await new Promise((resolve) => setTimeout(resolve, 10));
     const call = calls.runs.at(-1)!;
-    assert.deepEqual(call.options, { model: "gemini-2.5-flash", threshold: 0.8 });
+    assert.deepEqual(call.options, { model: "gemini-3.5-flash-lite", threshold: 0.8 });
     assert.equal(call.store, fakeMemoryStore);
 
     const status = await authed(`${base}/hygiene/status`);

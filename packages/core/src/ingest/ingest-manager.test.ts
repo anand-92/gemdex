@@ -81,7 +81,7 @@ function fakeBackend(): MemoryBackend & { imported: MemoryExportRecord[] } {
 
 function fakeDigester(overrides: Partial<Record<string, jest.Mock>> = {}): SessionDigester {
     return {
-        model: 'gemini-3.6-flash',
+        model: 'gemini-3.5-flash-lite',
         digest: overrides.digest ?? jest.fn(async () => ({
             title: 'Did a task',
             whatWasDone: 'It got done.',
@@ -299,7 +299,7 @@ describe('IngestManager — batch mode', () => {
         const filePath = writeSession('a.jsonl', 'sess-a');
         ledger.setPendingBatch({
             jobName: 'batches/job-1',
-            model: 'gemini-3.6-flash',
+            model: 'gemini-3.5-flash-lite',
             submittedAt: Date.now(),
             requests: {
                 'session-0': {
@@ -346,7 +346,7 @@ describe('IngestManager — batch mode', () => {
     });
 
     it('collect() clears a failed job', async () => {
-        ledger.setPendingBatch({ jobName: 'batches/x', model: 'gemini-3.6-flash', submittedAt: 1, requests: {} });
+        ledger.setPendingBatch({ jobName: 'batches/x', model: 'gemini-3.5-flash-lite', submittedAt: 1, requests: {} });
         const digester = fakeDigester({
             getClient: jest.fn(() => ({
                 batches: { get: jest.fn(async () => ({ state: 'JOB_STATE_FAILED', error: { message: 'nope' } })) },
@@ -359,7 +359,7 @@ describe('IngestManager — batch mode', () => {
     });
 
     it('cancelBatch() clears the pending job even when the API call fails', async () => {
-        ledger.setPendingBatch({ jobName: 'batches/x', model: 'gemini-3.6-flash', submittedAt: 1, requests: {} });
+        ledger.setPendingBatch({ jobName: 'batches/x', model: 'gemini-3.5-flash-lite', submittedAt: 1, requests: {} });
         const digester = fakeDigester({
             getClient: jest.fn(() => ({
                 batches: { cancel: jest.fn(async () => { throw new Error('terminal'); }) },

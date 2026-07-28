@@ -38,7 +38,7 @@ function report(clusters: HygieneCluster[]): HygieneReport {
         version: 1,
         scannedAt: 100,
         judgedAt: 200,
-        model: 'gemini-3.6-flash',
+        model: 'gemini-3.5-flash-lite',
         threshold: 0.8,
         memoryCount: 5,
         clusters,
