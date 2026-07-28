@@ -258,7 +258,7 @@ cosine similarity (default `DEFAULT_HYGIENE_THRESHOLD = 0.90`) using
 strongest-first, a merge is skipped if it would exceed `MAX_CLUSTER_MEMBERS = 8`,
 so overflow spills into sibling clusters instead of being dropped — lowering
 the threshold can only add candidates. **Phase 2 (`run`) is the LLM judge**:
-`ClusterJudge` (same Gemini models/pricing as ingest) reads each cluster
+`ClusterJudge` (same single Gemini model/pricing as ingest: `gemini-3.5-flash-lite`) reads each cluster
 oldest-first and returns a per-memory verdict (`keep` / `duplicate` /
 `superseded` / `contradicted`) with `supersededBy`, quoted `evidence`, and
 `confidence`; `parseJudgeResponse` guarantees a finding per member and forces

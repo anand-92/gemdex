@@ -2,8 +2,8 @@ import { GoogleGenAI, Type } from '@google/genai';
 import { ModelCostEstimate, ParsedSession, SessionDigest, SessionMeta } from './types';
 import { renderTranscript } from './transcript-parser';
 
-/** Default digest model — frontier-quality extraction. */
-export const DEFAULT_DIGEST_MODEL = 'gemini-3.6-flash';
+/** Default (and only) digest/judge model. */
+export const DEFAULT_DIGEST_MODEL = 'gemini-3.5-flash-lite';
 
 export interface DigestModelInfo {
     /** USD per 1M input tokens (text), standard pricing. */
@@ -17,34 +17,15 @@ export interface DigestModelInfo {
 export const DIGEST_PRICING_AS_OF = '2026-06-10';
 
 /**
- * Models offered for session digestion, with standard-tier pricing.
- * Batch API is 50% of these rates across the board.
+ * Models offered for session digestion and hygiene judging, with standard-tier
+ * pricing. Batch API is 50% of these rates across the board.
+ * Single model by design — no picker alternatives.
  */
 export const DIGEST_MODELS: Record<string, DigestModelInfo> = {
-    'gemini-3.6-flash': {
-        inputUsdPerMTok: 1.5,
-        outputUsdPerMTok: 9.0,
-        description: 'Best extraction quality (default)',
-    },
-    'gemini-3-flash-preview': {
-        inputUsdPerMTok: 0.5,
-        outputUsdPerMTok: 3.0,
-        description: 'Strong quality at lower cost',
-    },
     'gemini-3.5-flash-lite': {
         inputUsdPerMTok: 0.25,
         outputUsdPerMTok: 1.5,
-        description: 'Cost-efficient',
-    },
-    'gemini-2.5-flash': {
-        inputUsdPerMTok: 0.3,
-        outputUsdPerMTok: 2.5,
-        description: 'Balanced legacy option',
-    },
-    'gemini-2.5-flash-lite': {
-        inputUsdPerMTok: 0.1,
-        outputUsdPerMTok: 0.4,
-        description: 'Cheapest',
+        description: 'Default for digest and hygiene',
     },
 };
 

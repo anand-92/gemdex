@@ -48,7 +48,7 @@ function fakeStore(parents: ParentVectorData[] = PARENTS): MemoryStore {
 
 function fakeJudge(judge?: jest.Mock): ClusterJudge {
     return {
-        model: 'gemini-3.6-flash',
+        model: 'gemini-3.5-flash-lite',
         judge: judge ?? jest.fn(async (members: JudgeMemberInput[]): Promise<HygieneFinding[]> =>
             members.map((m, index) => index === 0
                 ? { memoryId: m.memoryId, verdict: 'keep', confidence: 'high' }
@@ -125,7 +125,7 @@ describe('HygieneManager.run', () => {
 
         const report = reportStore.getReport()!;
         expect(report.version).toBe(1);
-        expect(report.model).toBe('gemini-3.6-flash');
+        expect(report.model).toBe('gemini-3.5-flash-lite');
         expect(report.memoryCount).toBe(3);
         expect(report.clusters).toHaveLength(1);
         expect(report.clusters[0].findings).toEqual([

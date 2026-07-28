@@ -58,7 +58,7 @@ function makeState(pendingCount: number): FakeManagerState {
             estimatedInputTokens: 1000,
             estimatedOutputTokens: 800,
             estimates: [
-                { model: 'gemini-3.6-flash', standardUsd: 1.23, batchUsd: 0.62 },
+                { model: 'gemini-3.5-flash-lite', standardUsd: 1.23, batchUsd: 0.62 },
             ],
         },
         runResult: { state: 'done', processed: pendingCount, failed: 0, skipped: 0, total: pendingCount },
@@ -113,7 +113,7 @@ test('ingest-history --dry-run prints the scan and cost table without running', 
     const result = await run(['ingest-history', '--dry-run', '--source', sessions], state);
     assert.equal(result.code, 0);
     assert.match(result.stdout, /new: 3/);
-    assert.match(result.stdout, /gemini-3\.6-flash\s+standard \$1\.23\s+batch \$0\.62/);
+    assert.match(result.stdout, /gemini-3\.5-flash-lite\s+standard \$1\.23\s+batch \$0\.62/);
     assert.equal(state.runs.length, 0);
 });
 
@@ -146,7 +146,7 @@ test('ingest-history runs standard mode and reports the summary', async () => {
     assert.match(result.stdout, /Done — Ingested: 2, Failed: 0/);
     const options = state.runs[0] as { mode?: string; model?: string };
     assert.equal(options.mode, 'standard');
-    assert.equal(options.model, 'gemini-3.6-flash');
+    assert.equal(options.model, 'gemini-3.5-flash-lite');
 });
 
 test('ingest-history always skips changed sessions and prices only new ones', async () => {
@@ -157,7 +157,7 @@ test('ingest-history always skips changed sessions and prices only new ones', as
     state.scanResult.estimatedInputTokens = 900;
     state.scanResult.estimatedOutputTokens = 400;
     state.scanResult.estimates = [
-        { model: 'gemini-3.6-flash', standardUsd: 0.55, batchUsd: 0.28 },
+        { model: 'gemini-3.5-flash-lite', standardUsd: 0.55, batchUsd: 0.28 },
     ];
     const result = await run(['ingest-history', '--source', rootDir], state);
     assert.equal(result.code, 0);
@@ -184,7 +184,7 @@ test('ingest-history --batch submits and prints the job name', async () => {
     const state = makeState(2);
     state.runResult = {
         state: 'batchPending', processed: 0, failed: 0, skipped: 0, total: 2,
-        pendingBatch: { jobName: 'batches/42', model: 'gemini-3.6-flash', submittedAt: 1, requestCount: 2 },
+        pendingBatch: { jobName: 'batches/42', model: 'gemini-3.5-flash-lite', submittedAt: 1, requestCount: 2 },
     };
     const result = await run(['ingest-history', '--batch', '--source', rootDir], state);
     assert.equal(result.code, 0);
