@@ -235,7 +235,8 @@ export async function handleMemoryApiRequest(
             return true;
         }
 
-        // POST /import — restore/merge (upsert by id)
+        // POST /import — restore/merge (upsert by id, per-record fault tolerance:
+        // 200 carries { imported, failed, errors } so one bad record can't abort the batch)
         if (method === 'POST' && pathname === '/import') {
             const body = await readBody(req, ATTACHMENT_BODY_LIMIT);
             if (!Array.isArray(body?.records)) {

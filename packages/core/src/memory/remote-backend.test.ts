@@ -11,6 +11,7 @@ import {
 import type {
     AttachmentBytes,
     AttachmentCaptionUpdate,
+    ImportRecordsResult,
     Memory,
     MemoryAttachmentInput,
     MemoryBackend,
@@ -128,7 +129,7 @@ class FakeRemoteStore implements MemoryBackend {
         })));
     }
 
-    async importRecords(records: MemoryExportRecord[]): Promise<{ imported: number }> {
+    async importRecords(records: MemoryExportRecord[]): Promise<ImportRecordsResult> {
         for (const record of records) {
             const attachments = (record.attachments ?? []).map((attachment, index) => {
                 const id = attachment.id ?? String(index);
@@ -144,7 +145,7 @@ class FakeRemoteStore implements MemoryBackend {
             });
             this.memories.set(record.id, { ...record, attachments });
         }
-        return { imported: records.length };
+        return { imported: records.length, failed: 0, errors: [] };
     }
 
     async readAttachment(memoryId: string, attachmentId: string): Promise<AttachmentBytes | null> {
@@ -235,10 +236,43 @@ describe('RemoteMemoryBackend', () => {
             expect(exported).toHaveLength(1);
             await backend.delete(created.id);
             expect(await backend.get(created.id)).toBeNull();
-            expect(await backend.importRecords(exported)).toEqual({ imported: 1 });
+            expect(await backend.importRecords(exported)).toEqual({ imported: 1, failed: 0, errors: [] });
             expect((await backend.get(created.id))?.content).toBe('full parent memory content');
         } finally {
             await server.close();
+        }
+    });
+
+    it('passes through per-record import errors and defaults them for legacy servers', async () => {
+        // Servers pre-dating per-record import errors return only { imported }.
+        const legacy = await listen((_req, res) => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ imported: 3 }));
+        });
+        try {
+            const backend = new RemoteMemoryBackend({ url: legacy.url, token: 'secret' });
+            expect(await backend.importRecords([])).toEqual({ imported: 3, failed: 0, errors: [] });
+        } finally {
+            await legacy.close();
+        }
+
+        const withErrors = await listen((_req, res) => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                imported: 1,
+                failed: 1,
+                errors: [{ index: 1, id: 'bad-record', error: 'embedding exploded' }],
+            }));
+        });
+        try {
+            const backend = new RemoteMemoryBackend({ url: withErrors.url, token: 'secret' });
+            expect(await backend.importRecords([])).toEqual({
+                imported: 1,
+                failed: 1,
+                errors: [{ index: 1, id: 'bad-record', error: 'embedding exploded' }],
+            });
+        } finally {
+            await withErrors.close();
         }
     });
 

@@ -20,6 +20,8 @@ import {
 import {
     AttachmentKind,
     AttachmentCaptionUpdate,
+    ImportRecordError,
+    ImportRecordsResult,
     Memory,
     MemoryAttachment,
     MemoryAttachmentInput,
@@ -917,11 +919,16 @@ export class MemoryStore {
      * Import memories from portable records. Upsert by id (default merge
      * policy, §7.5): an existing id is replaced; a new id is inserted.
      * Re-embeds content + attachments via the configured embedding provider.
+     * Per-record fault-tolerant: a record that throws is collected into
+     * `errors` and the loop continues, so one bad record can't abort a large
+     * restore midway.
      */
-    async importRecords(records: MemoryExportRecord[]): Promise<{ imported: number }> {
+    async importRecords(records: MemoryExportRecord[]): Promise<ImportRecordsResult> {
         await this.ensureCollection();
         let imported = 0;
-        for (const record of records) {
+        const errors: ImportRecordError[] = [];
+        for (let index = 0; index < records.length; index++) {
+            const record = records[index];
             const content = record.content ?? '';
             const attachmentsInput: MemoryAttachmentInput[] = Array.isArray(record.attachments)
                 ? record.attachments.map((a) => ({
@@ -932,13 +939,21 @@ export class MemoryStore {
                 : [];
             if (content.trim().length === 0 && attachmentsInput.length === 0) continue;
 
-            const id = record.id || MemoryStore.newId();
-            const createdAt = Number(record.createdAt) || Date.now();
-            const updatedAt = Number(record.updatedAt) || createdAt;
-            await this.writeMemory(id, content, record.title, attachmentsInput, createdAt, updatedAt);
-            imported += 1;
+            try {
+                const id = record.id || MemoryStore.newId();
+                const createdAt = Number(record.createdAt) || Date.now();
+                const updatedAt = Number(record.updatedAt) || createdAt;
+                await this.writeMemory(id, content, record.title, attachmentsInput, createdAt, updatedAt);
+                imported += 1;
+            } catch (error) {
+                errors.push({
+                    index,
+                    ...(record.id && { id: record.id }),
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            }
         }
-        return { imported };
+        return { imported, failed: errors.length, errors };
     }
 
     /** Read stored attachments back into base64 inputs (for update preserve / re-embed). */

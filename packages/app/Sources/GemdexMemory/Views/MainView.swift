@@ -18,11 +18,19 @@ struct MainView: View {
         .navigationTitle("Gemdex Memory")
         .navigationSubtitle(model.statusText)
         .safeAreaInset(edge: .top, spacing: 0) {
-            if model.backendIsRemote && (model.ingestionNeedsAttention || model.ingestionIsChecking) {
-                ingestionReadinessBanner
+            VStack(spacing: 0) {
+                if model.backendIsRemote && (model.ingestionNeedsAttention || model.ingestionIsChecking) {
+                    ingestionReadinessBanner
+                }
+                if let progress = model.importProgress {
+                    importProgressBanner(progress)
+                }
             }
         }
         .toolbar { toolbarContent }
+        .alert(item: $model.importAlert) { alert in
+            Alert(title: Text(alert.title), message: Text(alert.message), dismissButton: .default(Text("OK")))
+        }
     }
 
     private var ingestionReadinessBanner: some View {
@@ -42,6 +50,27 @@ struct MainView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .background((checking ? Brand.gold : Color.red).opacity(0.08))
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    /// Live determinate progress while a file imports — re-embedding makes
+    /// large files take minutes, and silence reads as "nothing happened".
+    private func importProgressBanner(_ progress: ImportProgress) -> some View {
+        VStack(spacing: 6) {
+            HStack {
+                Text("Importing memories…")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                Text("\(progress.completed) / \(progress.total)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            ProgressView(value: Double(progress.completed), total: Double(max(progress.total, 1)))
+                .tint(Brand.gold)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Brand.gold.opacity(0.08))
         .overlay(alignment: .bottom) { Divider() }
     }
 
@@ -73,6 +102,7 @@ struct MainView: View {
             Button(action: importMemories) {
                 Label("Import", systemImage: "square.and.arrow.down")
             }
+            .disabled(model.importProgress != nil)
             Button { model.openNew() } label: {
                 Label("New Memory", systemImage: "plus")
             }

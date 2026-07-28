@@ -144,3 +144,25 @@ export interface MemoryExportRecord {
     /** Inline media, base64-encoded, for portable round-trips. */
     attachments?: MemoryExportAttachment[];
 }
+
+/** One record that failed to import: which record it was, and why. */
+export interface ImportRecordError {
+    /** Zero-based position of the record in the import payload. */
+    index: number;
+    /** The record's id, when it carried one. */
+    id?: string;
+    error: string;
+}
+
+/**
+ * `importRecords()` result. Importing is per-record fault-tolerant: a record
+ * that throws (embedding/network/validation) is collected into `errors` and
+ * the remaining records still import, so one bad record can't abort a large
+ * restore. Records with neither content nor attachments are skipped silently
+ * (counted in neither `imported` nor `failed`).
+ */
+export interface ImportRecordsResult {
+    imported: number;
+    failed: number;
+    errors: ImportRecordError[];
+}

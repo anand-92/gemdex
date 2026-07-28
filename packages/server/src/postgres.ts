@@ -8,6 +8,8 @@ import {
     DEFAULT_ATTACHMENT_LIMITS,
     deriveTitle,
     Embedding,
+    ImportRecordError,
+    ImportRecordsResult,
     Memory,
     MemoryAttachment,
     MemoryAttachmentInput,
@@ -486,9 +488,11 @@ export class PostgresMemoryBackend implements MemoryBackend {
         })));
     }
 
-    async importRecords(records: MemoryExportRecord[]): Promise<{ imported: number }> {
+    async importRecords(records: MemoryExportRecord[]): Promise<ImportRecordsResult> {
         let imported = 0;
-        for (const record of records) {
+        const errors: ImportRecordError[] = [];
+        for (let index = 0; index < records.length; index++) {
+            const record = records[index];
             const content = record.content ?? '';
             const attachments = Array.isArray(record.attachments)
                 ? record.attachments.map((attachment) => ({
@@ -499,18 +503,28 @@ export class PostgresMemoryBackend implements MemoryBackend {
                 }))
                 : [];
             if (content.trim().length === 0 && attachments.length === 0) continue;
-            const id = record.id || randomUUID();
-            await this.writeMemory(
-                id,
-                content,
-                record.title,
-                attachments,
-                Number.isFinite(record.createdAt) ? record.createdAt : Date.now(),
-                Number.isFinite(record.updatedAt) ? record.updatedAt : Date.now(),
-            );
-            imported += 1;
+            // Per-record fault tolerance, mirroring MemoryStore.importRecords:
+            // collect the failure and keep importing the remaining records.
+            try {
+                const id = record.id || randomUUID();
+                await this.writeMemory(
+                    id,
+                    content,
+                    record.title,
+                    attachments,
+                    Number.isFinite(record.createdAt) ? record.createdAt : Date.now(),
+                    Number.isFinite(record.updatedAt) ? record.updatedAt : Date.now(),
+                );
+                imported += 1;
+            } catch (error) {
+                errors.push({
+                    index,
+                    ...(record.id && { id: record.id }),
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            }
         }
-        return { imported };
+        return { imported, failed: errors.length, errors };
     }
 
     async readAttachment(memoryId: string, attachmentId: string): Promise<AttachmentBytes | null> {

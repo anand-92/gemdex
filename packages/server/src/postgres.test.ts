@@ -150,7 +150,7 @@ test('PostgresMemoryBackend persists save/update/delete/list/export/import acros
         assert.deepEqual(await afterRestart.list(), []);
 
         const result = await afterRestart.importRecords(exported);
-        assert.deepEqual(result, { imported: 1 });
+        assert.deepEqual(result, { imported: 1, failed: 0, errors: [] });
 
         const importedBackend = new PostgresMemoryBackend({ pool });
         const imported = await importedBackend.get(created.id);
@@ -297,7 +297,7 @@ test('external blob store backs save, read, export, import, and delete', async (
         await backend.delete(memory.id);
         assert.equal(await blobStore.has(blobRow.rows[0].storage_key), false);
 
-        assert.deepEqual(await backend.importRecords(exported), { imported: 1 });
+        assert.deepEqual(await backend.importRecords(exported), { imported: 1, failed: 0, errors: [] });
         assert.equal((await backend.readAttachment(memory.id, '0'))?.data.toString(), bytes.toString());
     } finally {
         await backend.close();

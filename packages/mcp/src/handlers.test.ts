@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import type {
     AttachmentBytes,
     AttachmentCaptionUpdate,
+    ImportRecordsResult,
     Memory,
     MemoryBackend,
     MemoryExportRecord,
@@ -76,8 +77,8 @@ class FakeBackend implements MemoryBackend {
         return [];
     }
 
-    async importRecords(_records: MemoryExportRecord[]): Promise<{ imported: number }> {
-        return { imported: 0 };
+    async importRecords(_records: MemoryExportRecord[]): Promise<ImportRecordsResult> {
+        return { imported: 0, failed: 0, errors: [] };
     }
 
     async readAttachment(_memoryId: string, _attachmentId: string): Promise<AttachmentBytes | null> {
