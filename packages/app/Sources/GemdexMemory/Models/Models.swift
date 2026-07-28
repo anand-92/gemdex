@@ -190,9 +190,19 @@ struct MigrationResult: Codable, Sendable {
     let skipped: Int
 }
 
-/// Import result (`POST /import`).
+/// One record that failed to import (`POST /import`).
+struct ImportFailure: Codable, Sendable {
+    let index: Int
+    let id: String?
+    let error: String
+}
+
+/// Import result (`POST /import`). `failed`/`errors` are optional so older
+/// sidecars that return only `imported` still decode.
 struct ImportResult: Codable, Sendable {
     let imported: Int
+    let failed: Int?
+    let errors: [ImportFailure]?
 }
 
 /// A portable export/import record (`GET /export`, `POST /import`). Attachments

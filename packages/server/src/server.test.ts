@@ -6,6 +6,7 @@ import type { MemoryBackend } from 'gemdex-core';
 import type {
     EmbeddingContent,
     EmbeddingVector,
+    ImportRecordsResult,
     Memory,
     MemoryAttachment,
     MemoryAttachmentInput,
@@ -123,7 +124,7 @@ class FakeMemoryBackend implements MemoryBackend {
         }));
     }
 
-    async importRecords(records: MemoryExportRecord[]): Promise<{ imported: number }> {
+    async importRecords(records: MemoryExportRecord[]): Promise<ImportRecordsResult> {
         for (const record of records) {
             const attachments = await this.prepareAttachments(record.id, record.attachments);
             this.memories.set(record.id, {
@@ -135,7 +136,7 @@ class FakeMemoryBackend implements MemoryBackend {
                 updatedAt: record.updatedAt,
             });
         }
-        return { imported: records.length };
+        return { imported: records.length, failed: 0, errors: [] };
     }
 
     async readAttachment(memoryId: string, attachmentId: string): Promise<AttachmentBytes | null> {
@@ -396,7 +397,7 @@ test('v1 memory API covers create/get/patch/put/recall/export/delete/import', as
             body: JSON.stringify({ records }),
         });
         assert.equal(importResponse.status, 200);
-        assert.deepEqual(await importResponse.json(), { imported: 1 });
+        assert.deepEqual(await importResponse.json(), { imported: 1, failed: 0, errors: [] });
         assert.equal((await fetch(`${base}/v1/memories/${created.id}`, { headers: auth })).status, 200);
     });
 });

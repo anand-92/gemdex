@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import type {
     AttachmentBytes,
     AttachmentCaptionUpdate,
+    ImportRecordsResult,
     Memory,
     MemoryAttachmentInput,
     MemoryBackend,
@@ -58,11 +59,11 @@ class FakeBackend implements MemoryBackend {
         return [...this.records.values()];
     }
 
-    async importRecords(records: MemoryExportRecord[]): Promise<{ imported: number }> {
+    async importRecords(records: MemoryExportRecord[]): Promise<ImportRecordsResult> {
         const item = records[0];
         if (this.failIds.has(item.id)) throw new Error('rejected');
         this.records.set(item.id, item);
-        return { imported: 1 };
+        return { imported: 1, failed: 0, errors: [] };
     }
 
     async readAttachment(_memoryId: string, _attachmentId: string): Promise<AttachmentBytes | null> {

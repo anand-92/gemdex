@@ -1,6 +1,7 @@
 import {
     AttachmentBytes,
     AttachmentCaptionUpdate,
+    ImportRecordsResult,
     Memory,
     MemoryExportRecord,
     MemoryRecallResult,
@@ -166,8 +167,8 @@ export class RemoteMemoryBackend implements MemoryBackend {
         return this.requireField(response.value, 'records', '/v1/export');
     }
 
-    async importRecords(records: MemoryExportRecord[]): Promise<{ imported: number }> {
-        const response = await this.request<{ imported: number }>('/v1/import', {
+    async importRecords(records: MemoryExportRecord[]): Promise<ImportRecordsResult> {
+        const response = await this.request<ImportRecordsResult>('/v1/import', {
             method: 'POST',
             body: { records },
         });
@@ -178,7 +179,10 @@ export class RemoteMemoryBackend implements MemoryBackend {
         ) {
             throw this.invalidResponse('/v1/import', "missing numeric 'imported' field");
         }
-        return { imported: response.value.imported };
+        // Servers pre-dating per-record import errors return only { imported }.
+        const failed = typeof response.value.failed === 'number' ? response.value.failed : 0;
+        const errors = Array.isArray(response.value.errors) ? response.value.errors : [];
+        return { imported: response.value.imported, failed, errors };
     }
 
     async readAttachment(memoryId: string, attachmentId: string): Promise<AttachmentBytes | null> {

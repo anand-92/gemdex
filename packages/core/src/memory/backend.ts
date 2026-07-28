@@ -2,6 +2,7 @@ import { MemoryStore, MemoryStoreConfig } from './memory-store';
 import {
     AttachmentBytes,
     AttachmentCaptionUpdate,
+    ImportRecordsResult,
     Memory,
     MemoryExportRecord,
     MemoryRecallResult,
@@ -27,7 +28,7 @@ export interface MemoryBackend {
     list(): Promise<MemorySummary[]>;
     delete(id: string): Promise<void>;
     exportAll(): Promise<MemoryExportRecord[]>;
-    importRecords(records: MemoryExportRecord[]): Promise<{ imported: number }>;
+    importRecords(records: MemoryExportRecord[]): Promise<ImportRecordsResult>;
     readAttachment(memoryId: string, attachmentId: string): Promise<AttachmentBytes | null>;
 }
 
@@ -83,7 +84,7 @@ export class LocalMemoryBackend implements MemoryBackend {
         return this.store.exportAll();
     }
 
-    importRecords(records: MemoryExportRecord[]): Promise<{ imported: number }> {
+    importRecords(records: MemoryExportRecord[]): Promise<ImportRecordsResult> {
         return this.store.importRecords(records);
     }
 

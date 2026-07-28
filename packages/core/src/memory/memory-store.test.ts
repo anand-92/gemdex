@@ -181,6 +181,34 @@ describe('MemoryStore', () => {
         expect(restored!.content).toBe('export A');
     });
 
+    it('importRecords collects per-record failures and imports the rest', async () => {
+        const result = await store.importRecords([
+            { id: 'import-ok-1', title: 'OK 1', content: 'first good record', createdAt: 1, updatedAt: 2 },
+            {
+                id: 'import-bad-media',
+                title: 'Bad media',
+                content: 'record whose attachment cannot embed',
+                createdAt: 3,
+                updatedAt: 4,
+                attachments: [{ mimeType: 'image/png', data: Buffer.from('img').toString('base64') }],
+            },
+            { id: 'import-ok-2', title: 'OK 2', content: 'second good record', createdAt: 5, updatedAt: 6 },
+        ]);
+
+        // FakeEmbedding is not multimodal, so the media record throws inside
+        // writeMemory — it must be collected without aborting the loop.
+        expect(result.imported).toBe(2);
+        expect(result.failed).toBe(1);
+        expect(result.errors).toHaveLength(1);
+        expect(result.errors[0].index).toBe(1);
+        expect(result.errors[0].id).toBe('import-bad-media');
+        expect(result.errors[0].error).toMatch(/multimodal/i);
+
+        expect((await store.get('import-ok-1'))?.content).toBe('first good record');
+        expect((await store.get('import-ok-2'))?.content).toBe('second good record');
+        expect(await store.get('import-bad-media')).toBeNull();
+    });
+
     it('lists parents with all their row vectors', async () => {
         const short = await store.save({ content: 'short memory', title: 'Short' });
         // Long enough to chunk into multiple rows (~1500 chars per chunk).

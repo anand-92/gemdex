@@ -443,7 +443,8 @@ export class IngestManager {
         };
         const result = await backend.importRecords([record]);
         if (result.imported !== 1) {
-            throw new Error(`Backend did not import digest for ${meta.filePath}`);
+            const detail = result.errors[0]?.error;
+            throw new Error(`Backend did not import digest for ${meta.filePath}${detail ? `: ${detail}` : ''}`);
         }
         this.ledger.recordIngested(request.filePath, {
             mtimeMs: request.mtimeMs,

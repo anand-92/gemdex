@@ -24,6 +24,20 @@ enum SearchState: Equatable {
     case failed(String)
 }
 
+/// Live import progress for the banner shown while a file imports; nil when
+/// no import is running.
+struct ImportProgress: Equatable {
+    var completed: Int
+    var total: Int
+}
+
+/// End-of-import alert payload (success / partial / failure).
+struct ImportAlert: Identifiable, Equatable {
+    let id = UUID()
+    let title: String
+    let message: String
+}
+
 /// Central observable app state. Owns the sidecar lifecycle, the API client,
 /// and all loaded memory/config/settings state. Views read from here and call
 /// its async methods; it never reaches around the sidecar for store access.
@@ -54,6 +68,11 @@ final class AppModel: ObservableObject {
 
     /// Semantic free-text search state (`.idle` = local title filter).
     @Published var searchState: SearchState = .idle
+
+    /// Non-nil while an import is running (drives the progress banner and
+    /// disables the Import button); the alert fires once when it finishes.
+    @Published var importProgress: ImportProgress?
+    @Published var importAlert: ImportAlert?
 
     let editor = EditorModel()
     let sidecar = SidecarManager()
@@ -321,20 +340,99 @@ final class AppModel: ObservableObject {
     }
 
     func importFile(_ url: URL) async {
-        guard let api else { return }
-        do {
-            // Read + parse off the main thread; the network import stays here.
-            let payload = try await Task.detached(priority: .userInitiated) {
-                let text = try String(contentsOf: url, encoding: .utf8)
-                let records = try Self.parseImport(text)
-                return try JSONSerialization.data(withJSONObject: ["records": records])
-            }.value
-            let result = try await api.importRecords(payload)
-            await refreshList()
-            setStatus("Imported \(result.imported) memories.")
-        } catch {
-            setStatus("Import failed: \(error.localizedDescription)", isError: true)
+        guard let api else {
+            importAlert = ImportAlert(
+                title: "Import unavailable",
+                message: "The memory store isn't ready yet. Try again in a moment."
+            )
+            return
         }
+        let batches: [[Any]]
+        do {
+            // Read + parse + batch off the main thread; the network import runs here.
+            batches = try await Task.detached(priority: .userInitiated) {
+                let text = try String(contentsOf: url, encoding: .utf8)
+                return try Self.batchImportRecords(Self.parseImport(text))
+            }.value
+        } catch {
+            importAlert = ImportAlert(title: "Import failed", message: error.localizedDescription)
+            setStatus("Import failed: \(error.localizedDescription)", isError: true)
+            return
+        }
+        let total = batches.reduce(0) { $0 + $1.count }
+        guard total > 0 else {
+            importAlert = ImportAlert(
+                title: "Nothing to import",
+                message: "The selected file doesn't contain any memory records."
+            )
+            return
+        }
+
+        // Import in batches so a large file shows real progress and one bad
+        // batch can't sink the whole import. The server is additionally
+        // per-record fault-tolerant within each batch.
+        importProgress = ImportProgress(completed: 0, total: total)
+        defer { importProgress = nil }
+        var imported = 0
+        var failedCount = 0
+        var failureDetails: [String] = []
+        var processed = 0
+        for batch in batches {
+            do {
+                let payload = try JSONSerialization.data(withJSONObject: ["records": batch])
+                let result = try await api.importRecords(payload)
+                imported += result.imported
+                failedCount += result.failed ?? 0
+                failureDetails.append(contentsOf: (result.errors ?? []).map(\.error))
+            } catch {
+                failedCount += batch.count
+                failureDetails.append("\(batch.count) records: \(error.localizedDescription)")
+            }
+            processed += batch.count
+            importProgress = ImportProgress(completed: processed, total: total)
+            setStatus("Importing \(processed) of \(total) memories…")
+        }
+
+        await refreshList()
+        if failedCount == 0 {
+            setStatus("Imported \(imported) \(imported == 1 ? "memory" : "memories").")
+            importAlert = ImportAlert(
+                title: "Import complete",
+                message: "Imported \(imported) \(imported == 1 ? "memory" : "memories")."
+            )
+        } else {
+            let sample = failureDetails.prefix(3).joined(separator: "\n")
+            setStatus("Imported \(imported) of \(total) memories (\(failedCount) failed)", isError: true)
+            importAlert = ImportAlert(
+                title: imported > 0 ? "Import partially complete" : "Import failed",
+                message: "Imported \(imported) of \(total) memories; \(failedCount) failed.\n\n\(sample)"
+            )
+        }
+    }
+
+    /// Split parsed records into POST-sized batches so a large import reports
+    /// real progress and a single failure can't sink the whole file. Batches
+    /// cap at a record count or a serialized byte budget, whichever comes
+    /// first (kept well under the sidecar's 100 MiB import body limit).
+    /// Pure + nonisolated so it can run on a detached background task.
+    nonisolated private static func batchImportRecords(_ records: [Any]) throws -> [[Any]] {
+        let recordLimit = 25
+        let byteLimit = 24 * 1024 * 1024
+        var batches: [[Any]] = []
+        var current: [Any] = []
+        var currentBytes = 0
+        for record in records {
+            let recordBytes = try JSONSerialization.data(withJSONObject: record).count
+            if !current.isEmpty && (current.count >= recordLimit || currentBytes + recordBytes > byteLimit) {
+                batches.append(current)
+                current = []
+                currentBytes = 0
+            }
+            current.append(record)
+            currentBytes += recordBytes
+        }
+        if !current.isEmpty { batches.append(current) }
+        return batches
     }
 
     /// Accept either a JSON array or JSONL (one record per line). Pure +

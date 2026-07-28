@@ -11,6 +11,7 @@ import type {
     AttachmentBytes,
     AttachmentCaptionUpdate,
     EmbeddingContent,
+    ImportRecordsResult,
     Memory,
     MemoryAttachmentInput,
     MemoryBackend,
@@ -151,9 +152,9 @@ class SettingsBackend implements MemoryBackend {
         return [...this.records.values()];
     }
 
-    async importRecords(records: MemoryExportRecord[]): Promise<{ imported: number }> {
+    async importRecords(records: MemoryExportRecord[]): Promise<ImportRecordsResult> {
         for (const record of records) this.records.set(record.id, record);
-        return { imported: records.length };
+        return { imported: records.length, failed: 0, errors: [] };
     }
 
     async readAttachment(_memoryId: string, _attachmentId: string): Promise<AttachmentBytes | null> {
