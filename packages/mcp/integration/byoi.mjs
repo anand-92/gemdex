@@ -326,7 +326,7 @@ async function run() {
             method: 'POST',
             body: JSON.stringify(exported),
         });
-        assert.deepEqual(imported, { imported: 1 });
+        assert.deepEqual(imported, { imported: 1, failed: 0, errors: [] });
         const restored = await remote.get(memoryId);
         assert(restored);
         assert.equal(restored.content, longContent);

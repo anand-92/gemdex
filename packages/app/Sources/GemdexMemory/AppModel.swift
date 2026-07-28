@@ -343,7 +343,7 @@ final class AppModel: ObservableObject {
         guard let api else {
             importAlert = ImportAlert(
                 title: "Import unavailable",
-                message: "The memory store isn't ready yet. Try again in a moment.",
+                message: "The memory store isn't ready yet. Try again in a moment."
             )
             return
         }
@@ -363,7 +363,7 @@ final class AppModel: ObservableObject {
         guard total > 0 else {
             importAlert = ImportAlert(
                 title: "Nothing to import",
-                message: "The selected file doesn't contain any memory records.",
+                message: "The selected file doesn't contain any memory records."
             )
             return
         }
@@ -398,14 +398,14 @@ final class AppModel: ObservableObject {
             setStatus("Imported \(imported) \(imported == 1 ? "memory" : "memories").")
             importAlert = ImportAlert(
                 title: "Import complete",
-                message: "Imported \(imported) \(imported == 1 ? "memory" : "memories").",
+                message: "Imported \(imported) \(imported == 1 ? "memory" : "memories")."
             )
         } else {
             let sample = failureDetails.prefix(3).joined(separator: "\n")
             setStatus("Imported \(imported) of \(total) memories (\(failedCount) failed)", isError: true)
             importAlert = ImportAlert(
                 title: imported > 0 ? "Import partially complete" : "Import failed",
-                message: "Imported \(imported) of \(total) memories; \(failedCount) failed.\n\n\(sample)",
+                message: "Imported \(imported) of \(total) memories; \(failedCount) failed.\n\n\(sample)"
             )
         }
     }
