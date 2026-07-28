@@ -1,6 +1,6 @@
 {
     "name": "gemdex-server",
-    "version": "1.0.32",
+    "version": "1.0.33",
     "description": "Self-hostable Gemdex Server — the official BYOI remote backend HTTP service",
     "type": "module",
     "main": "dist/index.js",
