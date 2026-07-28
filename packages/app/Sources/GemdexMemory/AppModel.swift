@@ -25,7 +25,8 @@ enum SearchState: Equatable {
 }
 
 /// Live import progress for the banner shown while a file imports; nil when
-/// no import is running.
+/// no import is running. Prefer `importActivity` / the Activity Center; this
+/// remains as a thin convenience mirror for callers that only need counts.
 struct ImportProgress: Equatable {
     var completed: Int
     var total: Int
@@ -74,11 +75,33 @@ final class AppModel: ObservableObject {
     @Published var importProgress: ImportProgress?
     @Published var importAlert: ImportAlert?
 
+    // MARK: Activity Center
+    // Long-running jobs (ingest / hygiene / import / migration) are owned here
+    // so closing a panel never loses progress. The Activity rail on MainView
+    // renders these; panels re-hydrate from them on reopen.
+
+    /// Live + brief terminal snapshots for every tracked job kind.
+    @Published private(set) var activities: [JobKind: JobActivity] = [:]
+    /// Last polled ingest status (panels read this instead of owning a poll).
+    @Published private(set) var ingestStatus: IngestStatus?
+    /// Last polled hygiene status.
+    @Published private(set) var hygieneStatus: HygieneStatus?
+
     let editor = EditorModel()
     let sidecar = SidecarManager()
     let thumbnails = ThumbnailLoader()
     private(set) var api: APIClient?
     private var cancellables = Set<AnyCancellable>()
+
+    /// Background poll of sidecar job status. Fast while active, slow when idle.
+    private var activityPollTask: Task<Void, Never>?
+    /// Cooperative cancel for client-side import batches.
+    private var importCancelRequested = false
+    /// Prevent double-complete UI when a panel and the poller both see "done".
+    private var lastIngestTerminalSignature: String?
+    private var lastHygieneTerminalSignature: String?
+    /// Auto-dismiss terminal activity chips after this many seconds.
+    private static let terminalDismissSeconds: TimeInterval = 12
 
     var visibleMemories: [MemorySummary] {
         let query = filterText.trimmingCharacters(in: .whitespaces).lowercased()
@@ -225,6 +248,10 @@ final class AppModel: ObservableObject {
             screen = .ready
             setStatus(Self.countLabel(list.count))
             await refreshPendingIngestBatch()
+            // Pick up any in-flight sidecar job (or pending batch) and keep the
+            // Activity Center polling for the rest of the session.
+            await refreshActivityStatus()
+            startActivityMonitoring()
         } catch let err as APIError {
             if config?.mode == "remote" {
                 screen = .remoteUnavailable(detail: err.message)
@@ -347,6 +374,9 @@ final class AppModel: ObservableObject {
             )
             return
         }
+        // One import at a time — the Activity Center and toolbar share this gate.
+        if activities[.importFile]?.isActive == true { return }
+
         let batches: [[Any]]
         do {
             // Read + parse + batch off the main thread; the network import runs here.
@@ -370,14 +400,33 @@ final class AppModel: ObservableObject {
 
         // Import in batches so a large file shows real progress and one bad
         // batch can't sink the whole import. The server is additionally
-        // per-record fault-tolerant within each batch.
+        // per-record fault-tolerant within each batch. Cancel is cooperative
+        // between batches (a in-flight POST still finishes).
+        importCancelRequested = false
         importProgress = ImportProgress(completed: 0, total: total)
-        defer { importProgress = nil }
+        upsertActivity(.running(
+            kind: .importFile,
+            title: "Importing memories",
+            completed: 0,
+            total: total,
+            detail: "Re-embedding each record",
+            canCancel: true,
+            canOpen: false
+        ))
+        defer {
+            importProgress = nil
+            importCancelRequested = false
+        }
         var imported = 0
         var failedCount = 0
         var failureDetails: [String] = []
         var processed = 0
+        var wasCancelled = false
         for batch in batches {
+            if importCancelRequested {
+                wasCancelled = true
+                break
+            }
             do {
                 let payload = try JSONSerialization.data(withJSONObject: ["records": batch])
                 let result = try await api.importRecords(payload)
@@ -390,12 +439,43 @@ final class AppModel: ObservableObject {
             }
             processed += batch.count
             importProgress = ImportProgress(completed: processed, total: total)
+            upsertActivity(.running(
+                kind: .importFile,
+                title: "Importing memories",
+                completed: processed,
+                total: total,
+                detail: "\(imported) saved" + (failedCount > 0 ? " · \(failedCount) failed" : ""),
+                canCancel: true,
+                canOpen: false
+            ))
             setStatus("Importing \(processed) of \(total) memories…")
         }
 
         await refreshList()
-        if failedCount == 0 {
+        if wasCancelled {
+            setStatus("Import cancelled — \(imported) of \(total) saved.")
+            finishActivity(
+                kind: .importFile,
+                phase: .cancelled,
+                title: "Import cancelled",
+                detail: "\(imported) of \(total) memories saved before cancel",
+                completed: processed,
+                total: total
+            )
+            importAlert = ImportAlert(
+                title: "Import cancelled",
+                message: "Saved \(imported) of \(total) memories before cancel."
+            )
+        } else if failedCount == 0 {
             setStatus("Imported \(imported) \(imported == 1 ? "memory" : "memories").")
+            finishActivity(
+                kind: .importFile,
+                phase: .completed,
+                title: "Import complete",
+                detail: "\(imported) \(imported == 1 ? "memory" : "memories") saved",
+                completed: total,
+                total: total
+            )
             importAlert = ImportAlert(
                 title: "Import complete",
                 message: "Imported \(imported) \(imported == 1 ? "memory" : "memories")."
@@ -403,6 +483,15 @@ final class AppModel: ObservableObject {
         } else {
             let sample = failureDetails.prefix(3).joined(separator: "\n")
             setStatus("Imported \(imported) of \(total) memories (\(failedCount) failed)", isError: true)
+            finishActivity(
+                kind: .importFile,
+                phase: imported > 0 ? .completed : .failed,
+                title: imported > 0 ? "Import partially complete" : "Import failed",
+                detail: "\(imported) of \(total) saved · \(failedCount) failed",
+                completed: processed,
+                total: total,
+                error: sample
+            )
             importAlert = ImportAlert(
                 title: imported > 0 ? "Import partially complete" : "Import failed",
                 message: "Imported \(imported) of \(total) memories; \(failedCount) failed.\n\n\(sample)"
@@ -459,7 +548,404 @@ final class AppModel: ObservableObject {
     /// the status route reports idle when no key/manager is available.
     func refreshPendingIngestBatch() async {
         guard let api else { return }
-        pendingIngestBatch = (try? await api.ingestStatus())?.pendingBatch
+        let status = try? await api.ingestStatus()
+        pendingIngestBatch = status?.pendingBatch
+        if let status { ingestStatus = status }
+    }
+
+    // MARK: - Activity Center
+
+    /// Active + terminal activities ordered for the rail (active first, newest last).
+    var activityList: [JobActivity] {
+        let order: [JobKind] = [.ingest, .hygiene, .importFile, .migration]
+        return order.compactMap { activities[$0] }
+    }
+
+    var hasActiveActivities: Bool {
+        activities.values.contains(where: \.isActive)
+    }
+
+    var ingestIsActive: Bool { activities[.ingest]?.isActive == true }
+    var hygieneIsActive: Bool { activities[.hygiene]?.isActive == true }
+    var importIsActive: Bool { activities[.importFile]?.isActive == true }
+
+    /// Convenience mirror used by the legacy import banner path.
+    var importActivity: JobActivity? { activities[.importFile] }
+
+    /// Jump into the panel for a job (or dismiss settings/editor first).
+    func openActivity(_ kind: JobKind) {
+        switch kind {
+        case .ingest:
+            showSettings = false
+            showHygiene = false
+            isEditorOpen = false
+            showIngest = true
+        case .hygiene:
+            showSettings = false
+            showIngest = false
+            isEditorOpen = false
+            showHygiene = true
+        case .importFile:
+            // Import has no dedicated panel; keep the user on the main list.
+            break
+        case .migration:
+            showIngest = false
+            showHygiene = false
+            isEditorOpen = false
+            showSettings = true
+        }
+    }
+
+    /// Cooperative / sidecar cancel for the given job kind.
+    func cancelActivity(_ kind: JobKind) {
+        switch kind {
+        case .importFile:
+            importCancelRequested = true
+            if var current = activities[.importFile], current.isActive {
+                current.phase = .cancelling
+                current.canCancel = false
+                current.detail = "Cancelling after this batch…"
+                current.updatedAt = Date()
+                activities[.importFile] = current
+            }
+        case .ingest:
+            Task { await cancelIngest() }
+        case .hygiene:
+            Task { await cancelHygiene() }
+        case .migration:
+            // Single blocking HTTP call — no cooperative cancel surface.
+            break
+        }
+    }
+
+    /// Dismiss a terminal (completed/failed/cancelled) activity chip.
+    func dismissActivity(_ kind: JobKind) {
+        guard let job = activities[kind], job.isTerminal else { return }
+        activities[kind] = nil
+    }
+
+    /// Called by IngestView right after `POST /ingest/start` succeeds so the
+    /// rail lights up even before the first poll returns.
+    func noteIngestStarted(total hintTotal: Int = 0) {
+        lastIngestTerminalSignature = nil
+        upsertActivity(.running(
+            kind: .ingest,
+            title: "Ingesting chat history",
+            completed: 0,
+            total: hintTotal,
+            detail: "Starting…",
+            canCancel: true,
+            canOpen: true
+        ))
+        startActivityMonitoring()
+    }
+
+    /// Called by HygieneView right after `POST /hygiene/start` succeeds.
+    func noteHygieneStarted(total hintTotal: Int = 0) {
+        lastHygieneTerminalSignature = nil
+        upsertActivity(.running(
+            kind: .hygiene,
+            title: "Analyzing memories",
+            completed: 0,
+            total: hintTotal,
+            detail: "Starting…",
+            canCancel: true,
+            canOpen: true
+        ))
+        startActivityMonitoring()
+    }
+
+    /// Show an indeterminate migration activity while local→remote import runs.
+    func noteMigrationStarted(remoteName: String) {
+        upsertActivity(.indeterminate(
+            kind: .migration,
+            title: "Importing local → \(remoteName)",
+            detail: "Copying memories to the remote store",
+            canCancel: false,
+            canOpen: true
+        ))
+    }
+
+    func noteMigrationFinished(created: Int, updated: Int, skipped: Int, error: String? = nil) {
+        if let error {
+            finishActivity(
+                kind: .migration,
+                phase: .failed,
+                title: "Local → remote failed",
+                detail: error,
+                completed: 0,
+                total: 0,
+                error: error
+            )
+        } else {
+            finishActivity(
+                kind: .migration,
+                phase: .completed,
+                title: "Local → remote complete",
+                detail: "\(created) new · \(updated) updated · \(skipped) skipped",
+                completed: created + updated + skipped,
+                total: created + updated + skipped
+            )
+        }
+    }
+
+    /// One-shot refresh of ingest + hygiene status into the Activity Center.
+    func refreshActivityStatus() async {
+        guard let api else { return }
+        async let ingest = try? api.ingestStatus()
+        async let hygiene = try? api.hygieneStatus()
+        let ingestLatest = await ingest
+        let hygieneLatest = await hygiene
+        if let ingestLatest {
+            applyIngestStatus(ingestLatest)
+        }
+        if let hygieneLatest {
+            applyHygieneStatus(hygieneLatest)
+        }
+    }
+
+    private func startActivityMonitoring() {
+        guard activityPollTask == nil else { return }
+        activityPollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                await self.refreshActivityStatus()
+                self.pruneStaleTerminalActivities()
+                // Poll fast while something is running; slow when only batch-
+                // pending or idle so we don't hammer the sidecar forever.
+                let active = self.activities.values.contains { $0.phase == .running || $0.phase == .cancelling }
+                let hasBatch = self.activities[.ingest]?.phase == .batchPending
+                let hasTerminal = self.activities.values.contains(where: \.isTerminal)
+                let nanos: UInt64
+                if active {
+                    nanos = 1_000_000_000
+                } else if hasBatch || hasTerminal {
+                    nanos = 3_000_000_000
+                } else {
+                    // Nothing to track — stop the loop; note*Started restarts it.
+                    self.activityPollTask = nil
+                    return
+                }
+                try? await Task.sleep(nanoseconds: nanos)
+            }
+        }
+    }
+
+    private func cancelIngest() async {
+        guard let api else { return }
+        if var current = activities[.ingest], current.isActive {
+            current.phase = .cancelling
+            current.canCancel = false
+            current.detail = "Cancelling… already-saved digests are kept"
+            current.updatedAt = Date()
+            activities[.ingest] = current
+        }
+        do {
+            try await api.ingestCancel()
+            // Standard-mode cancel is cooperative; re-poll until terminal.
+            // Batch-mode cancel clears the pending job immediately.
+            await refreshActivityStatus()
+        } catch {
+            setStatus("Cancel failed: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    private func cancelHygiene() async {
+        guard let api else { return }
+        if var current = activities[.hygiene], current.isActive {
+            current.phase = .cancelling
+            current.canCancel = false
+            current.detail = "Cancelling… partial findings are kept"
+            current.updatedAt = Date()
+            activities[.hygiene] = current
+        }
+        do {
+            try await api.hygieneCancel()
+            await refreshActivityStatus()
+        } catch {
+            setStatus("Cancel failed: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    private func applyIngestStatus(_ status: IngestStatus) {
+        ingestStatus = status
+        pendingIngestBatch = status.pendingBatch
+
+        switch status.state {
+        case "running":
+            lastIngestTerminalSignature = nil
+            let done = status.processed + status.failed
+            var detail = "\(status.processed) ingested · \(status.failed) failed · \(status.total) total"
+            if let current = status.currentFile, !current.isEmpty {
+                let name = (current as NSString).lastPathComponent
+                detail += " · \(name)"
+            }
+            upsertActivity(.running(
+                kind: .ingest,
+                title: "Ingesting chat history",
+                completed: done,
+                total: status.total,
+                detail: detail,
+                canCancel: true,
+                canOpen: true
+            ))
+
+        case "batchPending":
+            lastIngestTerminalSignature = nil
+            let pending = status.pendingBatch
+            let detail: String
+            if let pending {
+                detail = "\(pending.requestCount) sessions · \(pending.model) · collect when ready"
+            } else {
+                detail = "Batch job submitted — collect when ready"
+            }
+            upsertActivity(.indeterminate(
+                kind: .ingest,
+                title: "Batch job pending",
+                detail: detail,
+                phase: .batchPending,
+                canCancel: true,
+                canOpen: true
+            ))
+
+        case "done", "failed", "cancelled":
+            let signature = "\(status.state):\(status.processed):\(status.failed):\(status.total):\(status.error ?? "")"
+            guard signature != lastIngestTerminalSignature else { return }
+            lastIngestTerminalSignature = signature
+            // Only surface a terminal chip if we were already tracking this run.
+            // A cold-start poll of a leftover "done" status must not flash a banner.
+            let wasTracking = activities[.ingest]?.isActive == true
+                || activities[.ingest]?.phase == .cancelling
+            guard wasTracking else { return }
+            let phase: JobPhase = status.state == "done" ? .completed
+                : status.state == "cancelled" ? .cancelled : .failed
+            let title: String
+            switch phase {
+            case .completed: title = "Ingestion complete"
+            case .cancelled: title = "Ingestion cancelled"
+            default: title = "Ingestion failed"
+            }
+            let detail = "\(status.processed) saved" + (status.failed > 0 ? " · \(status.failed) failed" : "")
+            finishActivity(
+                kind: .ingest,
+                phase: phase,
+                title: title,
+                detail: status.error ?? detail,
+                completed: status.processed + status.failed,
+                total: max(status.total, status.processed + status.failed),
+                error: status.error
+            )
+            if phase == .completed || phase == .cancelled {
+                Task { await refreshList() }
+            }
+            if phase == .completed {
+                setStatus("Ingested \(status.processed) \(status.processed == 1 ? "memory" : "memories").")
+            } else if phase == .failed {
+                setStatus("Ingestion failed: \(status.error ?? "unknown error")", isError: true)
+            } else {
+                setStatus("Ingestion cancelled — \(status.processed) saved.")
+            }
+
+        default:
+            // idle — drop an active chip only if we thought something was running
+            // and the sidecar went quiet without a terminal state (unlikely).
+            break
+        }
+    }
+
+    private func applyHygieneStatus(_ status: HygieneStatus) {
+        hygieneStatus = status
+
+        switch status.state {
+        case "running":
+            lastHygieneTerminalSignature = nil
+            let done = status.judged + status.failed
+            upsertActivity(.running(
+                kind: .hygiene,
+                title: "Analyzing memories",
+                completed: done,
+                total: status.total,
+                detail: "\(status.judged) judged · \(status.failed) failed · \(status.total) clusters",
+                canCancel: true,
+                canOpen: true
+            ))
+
+        case "done", "failed", "cancelled":
+            let signature = "\(status.state):\(status.judged):\(status.failed):\(status.total):\(status.error ?? "")"
+            guard signature != lastHygieneTerminalSignature else { return }
+            lastHygieneTerminalSignature = signature
+            let wasTracking = activities[.hygiene]?.isActive == true
+                || activities[.hygiene]?.phase == .cancelling
+            guard wasTracking else { return }
+            let phase: JobPhase = status.state == "done" ? .completed
+                : status.state == "cancelled" ? .cancelled : .failed
+            let title: String
+            switch phase {
+            case .completed: title = "Hygiene analysis complete"
+            case .cancelled: title = "Hygiene analysis cancelled"
+            default: title = "Hygiene analysis failed"
+            }
+            let detail = "\(status.judged) clusters judged" + (status.failed > 0 ? " · \(status.failed) failed" : "")
+            finishActivity(
+                kind: .hygiene,
+                phase: phase,
+                title: title,
+                detail: status.error ?? detail,
+                completed: status.judged + status.failed,
+                total: max(status.total, status.judged + status.failed),
+                error: status.error
+            )
+            if phase == .completed {
+                setStatus("Hygiene analysis complete — review findings.")
+            } else if phase == .failed {
+                setStatus("Hygiene failed: \(status.error ?? "unknown error")", isError: true)
+            } else {
+                setStatus("Hygiene cancelled — partial findings kept.")
+            }
+
+        default:
+            break
+        }
+    }
+
+    private func upsertActivity(_ job: JobActivity) {
+        var next = job
+        next.updatedAt = Date()
+        activities[job.kind] = next
+    }
+
+    private func finishActivity(
+        kind: JobKind,
+        phase: JobPhase,
+        title: String,
+        detail: String?,
+        completed: Int,
+        total: Int,
+        error: String? = nil
+    ) {
+        let fraction: Double? = total > 0 ? Double(min(completed, total)) / Double(total) : nil
+        activities[kind] = JobActivity(
+            kind: kind,
+            phase: phase,
+            title: title,
+            detail: detail,
+            completed: completed,
+            total: total,
+            fraction: fraction,
+            canCancel: false,
+            canOpen: kind == .ingest || kind == .hygiene || kind == .migration,
+            error: error,
+            updatedAt: Date()
+        )
+        // Keep the poller alive briefly so auto-dismiss runs.
+        startActivityMonitoring()
+    }
+
+    private func pruneStaleTerminalActivities() {
+        let cutoff = Date().addingTimeInterval(-Self.terminalDismissSeconds)
+        for (kind, job) in activities where job.isTerminal && job.updatedAt < cutoff {
+            activities[kind] = nil
+        }
     }
 
     // MARK: - Setup
@@ -633,11 +1119,18 @@ final class AppModel: ObservableObject {
 
     func importLocalToRemote(_ name: String) async throws -> MigrationResult {
         guard let api else { throw APIError(status: -1, message: "Sidecar not ready", needsKey: false) }
-        let result = try await api.importLocalToRemote(name)
-        if backendIsRemote, config?.activeRemote?.name == name {
-            await loadMemories()
+        noteMigrationStarted(remoteName: name)
+        do {
+            let result = try await api.importLocalToRemote(name)
+            noteMigrationFinished(created: result.created, updated: result.updated, skipped: result.skipped)
+            if backendIsRemote, config?.activeRemote?.name == name {
+                await loadMemories()
+            }
+            return result
+        } catch {
+            noteMigrationFinished(created: 0, updated: 0, skipped: 0, error: error.localizedDescription)
+            throw error
         }
-        return result
     }
 
     func setStatus(_ text: String, isError: Bool = false) {

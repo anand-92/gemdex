@@ -61,9 +61,20 @@ struct GemdexMemoryApp: App {
                 }
                 .keyboardShortcut("r", modifiers: .command)
                 .disabled(model.screen != .ready)
-                Button("Ingest Chat History…") { model.showIngest = true }
-                    .keyboardShortcut("i", modifiers: [.command, .option])
-                    .disabled(model.screen != .ready)
+                Button(model.ingestIsActive || model.pendingIngestBatch != nil
+                       ? "Ingest Chat History (active)…"
+                       : "Ingest Chat History…") {
+                    model.openActivity(.ingest)
+                }
+                .keyboardShortcut("i", modifiers: [.command, .option])
+                .disabled(model.screen != .ready)
+                Button(model.hygieneIsActive
+                       ? "Memory Hygiene (active)…"
+                       : "Memory Hygiene…") {
+                    model.openActivity(.hygiene)
+                }
+                .keyboardShortcut("h", modifiers: [.command, .option])
+                .disabled(model.screen != .ready)
             }
         }
 

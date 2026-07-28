@@ -28,9 +28,13 @@ lint rules (`??` over `||`, no `eslint-disable`) do **not** apply.
   `#if SPARKLE_ENABLED`, otherwise a no-op that disables the menu item.
 - `Views/*` — per-screen SwiftUI: `RootView` (screen switch), `MainView`,
   `SidebarView`, `DetailPane`, `EditorView`, `AttachmentsSection`, `SetupView`,
-  `RecoveryView`, `LaunchOverlay`, `StorageSettingsView`, `HygieneView`
-  (memory-hygiene panel: scan → judge → review/delete/dismiss, local mode
-  only), `Theme.swift` (brand).
+  `RecoveryView`, `LaunchOverlay`, `StorageSettingsView`, `IngestView`,
+  `HygieneView` (memory-hygiene panel: scan → judge → review/delete/dismiss),
+  `ActivityRail` (global progress/cancel/open strip for long jobs),
+  `Theme.swift` (brand).
+- `Models/JobActivity.swift` — Activity Center DTOs (`JobKind` / `JobPhase` /
+  `JobActivity`). Long-running work is owned by `AppModel.activities`, not
+  panel-local `@State`, so navigating away never loses progress.
 - `macos/` — `build-app.sh` (assemble `.app`), `stage-sidecar.sh` (bundle
   Node+sidecar into Resources), `embed-sparkle.sh`, `sign-app.sh`,
   `package-dmg.sh`, `entitlements.plist`.
@@ -122,6 +126,17 @@ backend is unreachable, `loadMemories` surfaces `.remoteUnavailable`.
 (serializes baseURL/token mutation + requests). Slow/blocking work (probing,
 spawning, export/import file IO) runs in `Task.detached`; UI state is always
 mutated back on the main actor.
+
+## Activity Center (long-running jobs)
+
+Ingest, hygiene, JSON import, and local→remote migration are tracked on
+`AppModel` (`activities`, `ingestStatus`, `hygieneStatus`) and rendered by
+`ActivityRail` at the top of `MainView`. Closing a panel never cancels the job
+or hides progress. The rail exposes **Cancel** (cooperative: sidecar
+`/ingest/cancel` + `/hygiene/cancel`, import batch boundary) and **Show/Review**
+to reopen the panel. There is no pause primitive — cancel keeps already-saved
+work (ingest ledger / partial hygiene report / imported batches); re-run or
+collect continues from remaining work. Terminal chips auto-dismiss after ~12s.
 
 ## Build note
 

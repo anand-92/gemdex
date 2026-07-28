@@ -32,6 +32,10 @@ struct IngestView: View {
     @State private var busy = false
     @State private var error: String?
 
+    /// Prefer the Activity Center's live poll so closing this panel never
+    /// freezes the numbers shown when the user comes back.
+    private var liveStatus: IngestStatus? { model.ingestStatus ?? status }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
@@ -53,6 +57,14 @@ struct IngestView: View {
         .frame(maxWidth: isEmbedded ? 600 : .infinity)
         .background(isEmbedded ? nil : BrandBackdrop())
         .task { await loadSources() }
+        // Re-enter the right step if the Activity Center is already tracking
+        // a run (user navigated away and came back).
+        .onChange(of: model.ingestStatus?.state) { _ in
+            syncStepWithActivity()
+        }
+        .onChange(of: model.activities[.ingest]?.phase) { _ in
+            syncStepWithActivity()
+        }
     }
 
     // MARK: - Header / footer
@@ -101,13 +113,26 @@ struct IngestView: View {
                     .buttonStyle(BrandButtonStyle())
                     .disabled(busy || (scan?.pendingCount ?? 0) == 0 || !(sources?.ingestReady ?? false))
             case .running:
-                Button("Cancel") { Task { await cancel() } }
-                    .disabled(busy)
+                Text(model.activities[.ingest]?.phase == .cancelling
+                     ? "Cancelling… already-saved digests are kept"
+                     : "Runs in the background — safe to leave this panel")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(2)
+                Spacer(minLength: 8)
+                Button("Cancel") { model.cancelActivity(.ingest) }
+                    .disabled(busy || model.activities[.ingest]?.phase == .cancelling)
             case .batchSubmitted:
                 Button("Collect Results") { Task { await collect() } }
                     .buttonStyle(BrandButtonStyle())
                     .disabled(busy)
             case .done:
+                Button("Ingest more") {
+                    step = .sources
+                    scan = nil
+                    status = nil
+                    collectResult = nil
+                    error = nil
+                }
                 Button("Done") { close() }
                     .buttonStyle(BrandButtonStyle())
             }
@@ -303,31 +328,37 @@ struct IngestView: View {
     }
 
     private var runningStep: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Ingesting…").font(.headline)
-            let processed = (status?.processed ?? 0) + (status?.failed ?? 0)
-            ProgressView(value: Double(processed), total: Double(max(status?.total ?? 1, 1)))
+        let s = liveStatus
+        return VStack(alignment: .leading, spacing: 14) {
+            Text(model.activities[.ingest]?.phase == .cancelling ? "Cancelling…" : "Ingesting…")
+                .font(.headline)
+            let processed = (s?.processed ?? 0) + (s?.failed ?? 0)
+            ProgressView(value: Double(processed), total: Double(max(s?.total ?? 1, 1)))
+                .tint(Brand.gold)
             HStack {
-                Text("\(status?.processed ?? 0) ingested · \(status?.failed ?? 0) failed · \(status?.total ?? 0) total")
+                Text("\(s?.processed ?? 0) ingested · \(s?.failed ?? 0) failed · \(s?.total ?? 0) total")
                     .font(.callout).foregroundStyle(.secondary)
                 Spacer()
             }
-            if let current = status?.currentFile {
+            if let current = s?.currentFile {
                 Text(current).font(.caption.monospaced()).foregroundStyle(.secondary)
                     .lineLimit(1).truncationMode(.middle)
             }
+            Label("Progress stays visible in the activity bar if you leave this panel. Cancel keeps already-saved digests; re-run later to continue with remaining sessions.",
+                  systemImage: "info.circle")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .task { await pollStatus() }
     }
 
     private var batchSubmittedStep: some View {
         VStack(alignment: .leading, spacing: 14) {
             Label("Batch job submitted", systemImage: "paperplane")
                 .font(.headline)
-            if let pending = status?.pendingBatch ?? model.pendingIngestBatch {
+            if let pending = liveStatus?.pendingBatch ?? model.pendingIngestBatch {
                 pendingBatchCard(pending)
             }
-            Text("You can close this window — the job runs on Google's side. Come back any time and press “Collect Results” (also available from the sources screen).")
+            Text("Safe to leave this panel — the job runs on Google's side and stays in the activity bar. Collect results any time from here, the activity bar, or the sources screen.")
                 .font(.callout).foregroundStyle(.secondary)
             if let collectResult, collectResult.state == "pending" {
                 Label("Still processing (\(collectResult.jobState ?? "running")). Try again later.",
@@ -351,16 +382,37 @@ struct IngestView: View {
     }
 
     private var doneStep: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            let failed = collectResult?.failed ?? status?.failed ?? 0
-            Label(failed == 0 ? "Ingestion complete" : "Ingestion finished with failures",
-                  systemImage: failed == 0 ? "checkmark.circle" : "exclamationmark.triangle")
+        let s = liveStatus
+        let phase = model.activities[.ingest]?.phase
+        let failed = collectResult?.failed ?? s?.failed ?? 0
+        let wasCancelled = phase == .cancelled || s?.state == "cancelled"
+        let ingested = collectResult?.ingested ?? s?.processed ?? 0
+        let headline: String = {
+            if wasCancelled { return "Ingestion cancelled" }
+            if failed == 0 { return "Ingestion complete" }
+            return "Ingestion finished with failures"
+        }()
+        let icon: String = {
+            if wasCancelled { return "xmark.circle" }
+            if failed == 0 { return "checkmark.circle" }
+            return "exclamationmark.triangle"
+        }()
+        let color: Color = {
+            if wasCancelled { return Color.secondary }
+            if failed == 0 { return Brand.sage }
+            return Brand.terracotta
+        }()
+        return VStack(alignment: .leading, spacing: 14) {
+            Label(headline, systemImage: icon)
                 .font(.headline)
-                .foregroundStyle(failed == 0 ? Brand.sage : Brand.terracotta)
-            let ingested = collectResult?.ingested ?? status?.processed ?? 0
+                .foregroundStyle(color)
             Text("\(ingested) memories saved" + (failed > 0 ? " · \(failed) sessions failed" : ""))
                 .font(.callout)
-            if let err = collectResult?.error ?? status?.error {
+            if wasCancelled {
+                Text("Already-saved digests stay in your store. Scan again to continue with sessions that were not yet processed.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let err = collectResult?.error ?? s?.error {
                 Text(err).font(.caption).foregroundStyle(Brand.terracotta).textSelection(.enabled)
             }
             Text("Each memory ends with a provenance line pointing at the raw transcript on disk, so agents can recall the digest and open the full session when needed.")
@@ -413,11 +465,68 @@ struct IngestView: View {
             for preset in loaded.presets where preset.exists && preset.sessionCount > 0 {
                 selectedPresets.insert(preset.source)
             }
-            await model.refreshPendingIngestBatch()
+            await model.refreshActivityStatus()
+            // Resume whatever the Activity Center / sidecar already knows.
+            if !resumeFromActivity() {
+                await model.refreshPendingIngestBatch()
+            }
         } catch {
             let message = (error as? APIError)?.message ?? error.localizedDescription
             if model.handlePossibleInvalidIngestionKey(message) { return }
             self.error = message
+        }
+    }
+
+    /// Jump to running / batch / done when reopening mid-flight. Returns true
+    /// when the panel was rehydrated from live activity (so callers skip the
+    /// default sources layout).
+    @discardableResult
+    private func resumeFromActivity() -> Bool {
+        if let latest = model.ingestStatus {
+            status = latest
+        }
+        return syncStepWithActivity()
+    }
+
+    @discardableResult
+    private func syncStepWithActivity() -> Bool {
+        let state = model.ingestStatus?.state
+            ?? model.activities[.ingest].map { activityState($0.phase) }
+        switch state {
+        case "running":
+            if step != .running { step = .running }
+            status = model.ingestStatus ?? status
+            return true
+        case "batchPending":
+            if step != .batchSubmitted { step = .batchSubmitted }
+            status = model.ingestStatus ?? status
+            return true
+        case "done", "failed", "cancelled":
+            // Only jump to done if we were already on a run step (or the
+            // activity chip is still visible) — don't override a fresh sources
+            // visit after a long-finished prior run.
+            if step == .running || step == .batchSubmitted || model.activities[.ingest] != nil {
+                if step != .done { step = .done }
+                status = model.ingestStatus ?? status
+                return true
+            }
+            return false
+        default:
+            if model.pendingIngestBatch != nil, step == .sources {
+                // Soft signal only — stay on sources where Collect is available.
+                return false
+            }
+            return false
+        }
+    }
+
+    private func activityState(_ phase: JobPhase) -> String {
+        switch phase {
+        case .running, .cancelling: return "running"
+        case .batchPending: return "batchPending"
+        case .completed: return "done"
+        case .failed: return "failed"
+        case .cancelled: return "cancelled"
         }
     }
 
@@ -475,37 +584,16 @@ struct IngestView: View {
                 mode: useBatch ? "batch" : "standard"
             )
             status = nil
+            // Hand ownership to the Activity Center so leaving the panel is safe.
+            model.noteIngestStarted(total: scan?.pendingCount ?? 0)
             step = .running
-        }
-    }
-
-    /// Poll `/ingest/status` while the run step is visible. SwiftUI cancels
-    /// this task automatically when the view leaves the hierarchy.
-    private func pollStatus() async {
-        guard let api = model.api else { return }
-        while !Task.isCancelled, step == .running {
-            if let latest = try? await api.ingestStatus() {
-                status = latest
-                switch latest.state {
-                case "done", "failed", "cancelled":
-                    await finishRun()
-                    return
-                case "batchPending":
-                    model.pendingIngestBatch = latest.pendingBatch
-                    step = .batchSubmitted
-                    return
-                default:
-                    break
-                }
-            }
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
     }
 
     private func finishRun() async {
         step = .done
         await model.refreshList()
-        await model.refreshPendingIngestBatch()
+        await model.refreshActivityStatus()
     }
 
     private func collect() async {
@@ -518,17 +606,13 @@ struct IngestView: View {
                 await finishRun()
             case "pending":
                 step = .batchSubmitted
+                await model.refreshActivityStatus()
             case "none":
                 model.pendingIngestBatch = nil
+                model.dismissActivity(.ingest)
             default:
                 break
             }
-        }
-    }
-
-    private func cancel() async {
-        await withBusy {
-            try await model.api?.ingestCancel()
         }
     }
 

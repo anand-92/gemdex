@@ -37,6 +37,9 @@ struct HygieneView: View {
     @State private var busy = false
     @State private var error: String?
 
+    /// Prefer the Activity Center's live poll so leaving the panel never freezes progress.
+    private var liveStatus: HygieneStatus? { model.hygieneStatus ?? status }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
@@ -58,6 +61,12 @@ struct HygieneView: View {
         .frame(maxWidth: isEmbedded ? 640 : .infinity)
         .background(isEmbedded ? nil : BrandBackdrop())
         .task { await loadReport() }
+        .onChange(of: model.hygieneStatus?.state) { _ in
+            syncStepWithActivity()
+        }
+        .onChange(of: model.activities[.hygiene]?.phase) { _ in
+            syncStepWithActivity()
+        }
     }
 
     // MARK: - Header / footer
@@ -108,8 +117,12 @@ struct HygieneView: View {
                     .disabled(busy || (scan?.clusters.isEmpty ?? true) || !hygieneReady)
             case .running:
                 Spacer()
-                Button("Cancel") { Task { await cancel() } }
-                    .disabled(busy)
+                Text(model.activities[.hygiene]?.phase == .cancelling
+                     ? "Cancelling… partial findings are kept"
+                     : "Runs in the background — safe to leave this panel")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Cancel") { model.cancelActivity(.hygiene) }
+                    .disabled(busy || model.activities[.hygiene]?.phase == .cancelling)
             case .review:
                 if let progress = applyProgress {
                     // Replace the footer controls with determinate progress
@@ -300,19 +313,27 @@ struct HygieneView: View {
     }
 
     private var runningStep: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Analyzing clusters…").font(.headline)
-            let done = (status?.judged ?? 0) + (status?.failed ?? 0)
-            ProgressView(value: Double(done), total: Double(max(status?.total ?? 1, 1)))
+        let s = liveStatus
+        return VStack(alignment: .leading, spacing: 14) {
+            Text(model.activities[.hygiene]?.phase == .cancelling
+                 ? "Cancelling…"
+                 : "Analyzing clusters…")
+                .font(.headline)
+            let done = (s?.judged ?? 0) + (s?.failed ?? 0)
+            ProgressView(value: Double(done), total: Double(max(s?.total ?? 1, 1)))
+                .tint(Brand.sage)
             HStack {
-                Text("\(status?.judged ?? 0) judged · \(status?.failed ?? 0) failed · \(status?.total ?? 0) total")
+                Text("\(s?.judged ?? 0) judged · \(s?.failed ?? 0) failed · \(s?.total ?? 0) total")
                     .font(.callout).foregroundStyle(.secondary)
                 Spacer()
             }
             Text("The judge model reads each cluster's memories and marks every one as keep, duplicate, superseded, or contradicted — with evidence.")
                 .font(.caption).foregroundStyle(.secondary)
+            Label("Progress stays visible in the activity bar if you leave this panel. Cancel keeps partial findings so you can review what finished.",
+                  systemImage: "info.circle")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .task { await pollStatus() }
     }
 
     @ViewBuilder
@@ -487,16 +508,64 @@ struct HygieneView: View {
         do {
             let loaded = try await api.hygieneReport()
             apply(envelope: loaded)
-            // If a run is already in flight (e.g. the panel was reopened),
-            // jump straight back to the progress screen.
-            if let latest = try? await api.hygieneStatus(), latest.state == "running" {
-                status = latest
-                step = .running
+            await model.refreshActivityStatus()
+            // Resume mid-flight analysis, or jump to review if a fresh report
+            // just finished while the panel was closed.
+            if !resumeFromActivity() {
+                if let latest = model.hygieneStatus, latest.state == "running" {
+                    status = latest
+                    step = .running
+                }
             }
         } catch {
             let message = (error as? APIError)?.message ?? error.localizedDescription
             if model.handlePossibleInvalidIngestionKey(message) { return }
             self.error = message
+        }
+    }
+
+    @discardableResult
+    private func resumeFromActivity() -> Bool {
+        if let latest = model.hygieneStatus {
+            status = latest
+        }
+        return syncStepWithActivity()
+    }
+
+    @discardableResult
+    private func syncStepWithActivity() -> Bool {
+        let state = model.hygieneStatus?.state
+            ?? model.activities[.hygiene].map { activityState($0.phase) }
+        switch state {
+        case "running":
+            if step != .running { step = .running }
+            status = model.hygieneStatus ?? status
+            return true
+        case "done", "cancelled", "failed":
+            // Only auto-advance while we were showing the progress screen —
+            // the Activity Center owns terminal chips after that.
+            guard step == .running else { return false }
+            let latest = model.hygieneStatus ?? status ?? HygieneStatus(
+                state: state ?? "done",
+                judged: 0,
+                failed: 0,
+                total: 0,
+                error: model.activities[.hygiene]?.error
+            )
+            Task { await finishRun(latest) }
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func activityState(_ phase: JobPhase) -> String {
+        switch phase {
+        case .running, .cancelling: return "running"
+        case .batchPending: return "running"
+        case .completed: return "done"
+        case .failed: return "failed"
+        case .cancelled: return "cancelled"
         }
     }
 
@@ -527,30 +596,17 @@ struct HygieneView: View {
             guard let api = model.api else { return }
             try await api.hygieneStart(model: selectedModel)
             status = nil
+            // Hand ownership to the Activity Center so leaving the panel is safe.
+            model.noteHygieneStarted(total: scan?.clusters.count ?? 0)
             step = .running
         }
     }
 
-    /// Poll `/hygiene/status` while the run step is visible. SwiftUI cancels
-    /// this task automatically when the view leaves the hierarchy.
-    private func pollStatus() async {
-        guard let api = model.api else { return }
-        while !Task.isCancelled, step == .running {
-            if let latest = try? await api.hygieneStatus() {
-                status = latest
-                switch latest.state {
-                case "done", "failed", "cancelled":
-                    await finishRun(latest)
-                    return
-                default:
-                    break
-                }
-            }
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-        }
-    }
-
     private func finishRun(_ latest: HygieneStatus) async {
+        // Avoid re-entering review repeatedly while the Activity Center holds
+        // a terminal chip (onChange would fire again).
+        guard step == .running else { return }
+        status = latest
         if latest.state == "failed", let message = latest.error {
             error = message
         }
@@ -654,12 +710,6 @@ struct HygieneView: View {
             for member in cluster.members {
                 selectedIds.remove(member.memoryId)
             }
-        }
-    }
-
-    private func cancel() async {
-        await withBusy {
-            try await model.api?.hygieneCancel()
         }
     }
 
