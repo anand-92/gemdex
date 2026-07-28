@@ -72,7 +72,6 @@ struct GemdexMemoryApp: App {
                 .environmentObject(model)
                 .environment(\.gemdexIsOLED, appearance.isOLED)
                 .preferredColorSchemeIfAvailable(appearance.colorScheme)
-                .frame(width: 540, height: 560)
         }
     }
 }

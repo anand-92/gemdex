@@ -28,6 +28,7 @@ struct StorageSettingsView: View {
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
+                    appearanceSection
                     geminiSection
                     modeChooser
                     remoteChooser
@@ -39,8 +40,9 @@ struct StorageSettingsView: View {
                 .padding(20)
             }
         }
-        .frame(width: isEmbedded ? nil : 620, height: isEmbedded ? nil : 660)
-        .frame(maxWidth: isEmbedded ? 640 : .infinity)
+        .frame(width: isEmbedded ? nil : 620)
+        .frame(minHeight: isEmbedded ? 0 : 560)
+        .frame(maxWidth: isEmbedded ? 640 : .infinity, maxHeight: isEmbedded ? .infinity : nil)
         .background(isEmbedded ? nil : BrandBackdrop())
         .task { await refresh() }
     }
@@ -164,6 +166,22 @@ struct StorageSettingsView: View {
             .brandPrimary()
             .disabled(saving || trimmedFormName.isEmpty || trimmedFormURL.isEmpty)
             Text("The token is sent once to the localhost sidecar and stored in ~/.gemdex/.env. It is never returned to this app.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private var appearanceSection: some View {
+        @AppStorage(Appearance.storageKey) var appearanceRaw = Appearance.system.rawValue
+        return VStack(alignment: .leading, spacing: 10) {
+            Text("Appearance").font(.headline)
+            Picker("", selection: $appearanceRaw) {
+                ForEach(Appearance.allCases) { option in
+                    Text(option.label).tag(option.rawValue)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            Text("OLED Pure Black renders the window and sidebar as true black so unlit pixels stay fully off.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
