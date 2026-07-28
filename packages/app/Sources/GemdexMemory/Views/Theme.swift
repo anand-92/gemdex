@@ -1,6 +1,63 @@
 import SwiftUI
 import AppKit
 
+/// User-selectable app appearance. `oledPureBlack` is a true-black (`#000000`)
+/// dark theme tuned for OLED panels: the window backdrop and sidebar render as
+/// solid black (no vibrancy material, no drifting brand blobs) so unlit pixels
+/// stay fully off, while glass surfaces keep a faint lift via hairline strokes.
+/// Persisted in `UserDefaults` under `gemdex.appearance`.
+enum Appearance: String, CaseIterable, Identifiable {
+    case system
+    case light
+    case dark
+    case oledPureBlack
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .system: return "System"
+        case .light: return "Light"
+        case .dark: return "Dark"
+        case .oledPureBlack: return "OLED Pure Black"
+        }
+    }
+
+    /// The color scheme SwiftUI should render under this appearance. OLED is a
+    /// dark theme, so it maps to `.dark`; the black-specific styling keys off
+    /// `isOLED` instead of a new scheme.
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .system: return nil
+        case .light: return .light
+        case .dark, .oledPureBlack: return .dark
+        }
+    }
+
+    var isOLED: Bool { self == .oledPureBlack }
+
+    /// Reads the persisted selection without a SwiftUI environment (used by the
+    /// AppDelegate when configuring window chrome).
+    static var persisted: Appearance {
+        Appearance(rawValue: UserDefaults.standard.string(forKey: storageKey) ?? "") ?? .system
+    }
+
+    static let storageKey = "gemdex.appearance"
+}
+
+/// Environment flag so any view can branch on OLED being active (backdrop,
+/// glass surfaces, sidebar background).
+private struct GemdexOLEDKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var gemdexIsOLED: Bool {
+        get { self[GemdexOLEDKey.self] }
+        set { self[GemdexOLEDKey.self] = newValue }
+    }
+}
+
 /// Gemdex brand palette + the shared Liquid Glass design system. Colors are
 /// warm paper/terracotta to match the hand-drawn brand art; surfaces lean on
 /// macOS 26 Liquid Glass (`.glassEffect`) where available and degrade to
@@ -69,26 +126,10 @@ extension View {
     /// Vibrancy + hairline-stroke fallback used on pre-macOS-26 SDKs/runtimes.
     /// The tint fill lives *inside* the background so it sits behind content
     /// (keeping text/icon contrast); only the hairline stroke overlays on top.
-    @ViewBuilder
+    /// On OLED the material is replaced with a near-black fill so cards sit on
+    /// pure black without the grey cast vibrancy adds.
     func glassFallback(cornerRadius: CGFloat, tint: Color?) -> some View {
-        background(
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay(
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .fill(tint?.opacity(0.10) ?? .clear)
-                )
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .strokeBorder(
-                    LinearGradient(
-                        colors: [Color.white.opacity(0.35), Color.white.opacity(0.05)],
-                        startPoint: .top, endPoint: .bottom
-                    ),
-                    lineWidth: 0.75
-                )
-        )
+        modifier(GlassFallbackModifier(cornerRadius: cornerRadius, tint: tint))
     }
 
     /// An interactive glass surface that reacts to hover/press on macOS 26+.
@@ -121,6 +162,37 @@ extension View {
         #else
         self
         #endif
+    }
+}
+
+/// Implements `glassFallback` as a modifier so it can read `@Environment`
+/// (View extension methods can't). OLED swaps the vibrancy material for a
+/// near-black fill, keeping the same hairline stroke and tint overlay.
+private struct GlassFallbackModifier: ViewModifier {
+    @Environment(\.gemdexIsOLED) private var isOLED
+    let cornerRadius: CGFloat
+    let tint: Color?
+
+    func body(content: Content) -> some View {
+        content
+            .background(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(isOLED ? AnyShapeStyle(Color.white.opacity(0.06)) : AnyShapeStyle(.ultraThinMaterial))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .fill(tint?.opacity(0.10) ?? .clear)
+                    )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [Color.white.opacity(isOLED ? 0.16 : 0.35), Color.white.opacity(0.05)],
+                            startPoint: .top, endPoint: .bottom
+                        ),
+                        lineWidth: 0.75
+                    )
+            )
     }
 }
 
@@ -170,12 +242,25 @@ extension View {
 /// window's vibrancy. Gives the Liquid Glass surfaces something warm and alive
 /// to refract. Respects Reduce Motion (drift disabled) and stays subtle so
 /// content keeps its contrast.
+///
+/// In OLED Pure Black mode the whole thing collapses to a flat `Color.black`:
+/// no window material, no drifting blobs. Unlit pixels stay fully off, which
+/// is the entire point of the mode.
 struct BrandBackdrop: View {
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.gemdexIsOLED) private var isOLED
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var drift = false
 
     var body: some View {
+        if isOLED {
+            Color.black.ignoresSafeArea()
+        } else {
+            ambientBackdrop
+        }
+    }
+
+    private var ambientBackdrop: some View {
         ZStack {
             VisualEffectBackground(material: .underWindowBackground).ignoresSafeArea()
 

@@ -6,6 +6,7 @@ import SwiftUI
 /// the detail editor.
 struct SidebarView: View {
     @EnvironmentObject var model: AppModel
+    @Environment(\.gemdexIsOLED) private var isOLED
 
     var body: some View {
         VStack(spacing: 0) {
@@ -15,7 +16,9 @@ struct SidebarView: View {
                 .padding(.bottom, 6)
             listContent
         }
-        .background(VisualEffectBackground(material: .sidebar).ignoresSafeArea())
+        // OLED: solid black instead of the sidebar vibrancy material, so the
+        // source list blends into the pure-black window.
+        .background((isOLED ? AnyView(Color.black) : AnyView(VisualEffectBackground(material: .sidebar))).ignoresSafeArea())
     }
 
     private var filterField: some View {

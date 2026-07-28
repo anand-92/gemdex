@@ -6,11 +6,18 @@ struct GemdexMemoryApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model = AppModel()
     @StateObject private var updater = UpdaterController()
+    @AppStorage(Appearance.storageKey) private var appearanceRaw = Appearance.system.rawValue
+
+    private var appearance: Appearance {
+        Appearance(rawValue: appearanceRaw) ?? .system
+    }
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environmentObject(model)
+                .environment(\.gemdexIsOLED, appearance.isOLED)
+                .preferredColorSchemeIfAvailable(appearance.colorScheme)
                 .frame(minWidth: 820, minHeight: 560)
                 .onAppear { model.start() }
         }
@@ -35,6 +42,19 @@ struct GemdexMemoryApp: App {
                 Button("Check for Updates…") { updater.checkForUpdates() }
                     .disabled(!updater.canCheckForUpdates)
             }
+            // Insert into the system View menu rather than adding a second
+            // top-level "View" (a CommandMenu("View") collides and renders
+            // two View menus).
+            CommandGroup(after: .sidebar) {
+                Menu("Appearance") {
+                    Picker("Appearance", selection: $appearanceRaw) {
+                        ForEach(Appearance.allCases) { option in
+                            Text(option.label).tag(option.rawValue)
+                        }
+                    }
+                    .pickerStyle(.inline)
+                }
+            }
             CommandGroup(after: .toolbar) {
                 Button("Refresh") {
                     Task { await model.refreshList() }
@@ -50,7 +70,22 @@ struct GemdexMemoryApp: App {
         Settings {
             StorageSettingsView()
                 .environmentObject(model)
-                .frame(width: 540, height: 560)
+                .environment(\.gemdexIsOLED, appearance.isOLED)
+                .preferredColorSchemeIfAvailable(appearance.colorScheme)
+        }
+    }
+}
+
+extension View {
+    /// `.preferredColorScheme` takes a non-optional scheme, so `.system` can't
+    /// be expressed directly. This helper leaves the view untouched when the
+    /// appearance is `.system` (nil scheme), letting macOS drive.
+    @ViewBuilder
+    func preferredColorSchemeIfAvailable(_ scheme: ColorScheme?) -> some View {
+        if let scheme {
+            self.preferredColorScheme(scheme)
+        } else {
+            self
         }
     }
 }
@@ -82,6 +117,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.configureWindow(window)
             }
         }
+
+        center.addObserver(
+            forName: UserDefaults.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.reconfigureAllWindows()
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -101,19 +144,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
         }
-        
+
         guard window.styleMask.contains(.titled) else { return }
         guard !(window is NSPanel) else { return }
-        
+
         if !window.styleMask.contains(.fullSizeContentView) || !window.titlebarAppearsTransparent || window.titlebarSeparatorStyle != .none {
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden
             window.styleMask.insert(.fullSizeContentView)
             window.titlebarSeparatorStyle = .none
             window.isMovableByWindowBackground = true
+            window.hasShadow = true
+        }
+        applyWindowBackground(window)
+    }
+
+    /// OLED Pure Black needs a genuinely black, opaque window backing; the
+    /// default vibrancy path uses a transparent window so the system material
+    /// can show through. This is re-applied on launch and whenever the
+    /// appearance defaults change (the menu flips `gemdex.appearance`).
+    private func applyWindowBackground(_ window: NSWindow) {
+        if Appearance.persisted.isOLED {
+            window.backgroundColor = .black
+            window.isOpaque = true
+        } else {
             window.backgroundColor = .clear
             window.isOpaque = false
-            window.hasShadow = true
+        }
+    }
+
+    func applicationDidChangeScreenParameters(_ notification: Notification) {
+        reconfigureAllWindows()
+    }
+
+    private func reconfigureAllWindows() {
+        for window in NSApp.windows {
+            configureWindow(window)
         }
     }
 
