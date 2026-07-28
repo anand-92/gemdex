@@ -22,9 +22,9 @@ struct MainView: View {
                 if model.backendIsRemote && (model.ingestionNeedsAttention || model.ingestionIsChecking) {
                     ingestionReadinessBanner
                 }
-                if let progress = model.importProgress {
-                    importProgressBanner(progress)
-                }
+                // Unified Activity Center — ingest, hygiene, import, migration.
+                // Survives panel navigation so progress/cancel never vanish.
+                ActivityRail()
             }
         }
         .toolbar { toolbarContent }
@@ -53,27 +53,6 @@ struct MainView: View {
         .overlay(alignment: .bottom) { Divider() }
     }
 
-    /// Live determinate progress while a file imports — re-embedding makes
-    /// large files take minutes, and silence reads as "nothing happened".
-    private func importProgressBanner(_ progress: ImportProgress) -> some View {
-        VStack(spacing: 6) {
-            HStack {
-                Text("Importing memories…")
-                    .font(.caption.weight(.semibold))
-                Spacer()
-                Text("\(progress.completed) / \(progress.total)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-            ProgressView(value: Double(progress.completed), total: Double(max(progress.total, 1)))
-                .tint(Brand.gold)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(Brand.gold.opacity(0.08))
-        .overlay(alignment: .bottom) { Divider() }
-    }
-
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         backendBadgeItem
@@ -82,32 +61,86 @@ struct MainView: View {
         }
         ToolbarItemGroup(placement: .primaryAction) {
             Button { model.showSettings = true; model.showIngest = false; model.showHygiene = false } label: {
-                Label("Storage", systemImage: "externaldrive")
+                Label("Storage", systemImage: model.activities[.migration]?.isActive == true
+                      ? "externaldrive.badge.timemachine"
+                      : "externaldrive")
             }
-            Button { model.showIngest = true; model.showSettings = false; model.showHygiene = false } label: {
-                Label("Ingest Chat History", systemImage: model.ingestionIsReady ? "tray.and.arrow.down" : "exclamationmark.triangle.fill")
+            .help(model.activities[.migration]?.isActive == true
+                  ? "Local → remote import in progress"
+                  : "Storage & Gemini settings")
+            Button {
+                model.showIngest = true
+                model.showSettings = false
+                model.showHygiene = false
+            } label: {
+                Label(
+                    model.ingestIsActive || model.pendingIngestBatch != nil
+                        ? "Ingest (active)"
+                        : "Ingest Chat History",
+                    systemImage: ingestToolbarIcon
+                )
             }
-            .help(model.ingestionIsReady
-                  ? "Ingest new coding-agent sessions as memories"
-                  : "Gemini key validation required before ingestion")
-            Button { model.showHygiene = true; model.showSettings = false; model.showIngest = false } label: {
-                Label("Memory Hygiene", systemImage: model.hygieneIsReady ? "sparkles" : "exclamationmark.triangle.fill")
+            .help(ingestToolbarHelp)
+            Button {
+                model.showHygiene = true
+                model.showSettings = false
+                model.showIngest = false
+            } label: {
+                Label(
+                    model.hygieneIsActive ? "Hygiene (active)" : "Memory Hygiene",
+                    systemImage: hygieneToolbarIcon
+                )
             }
-            .help(model.hygieneIsReady
-                  ? "Find stale, duplicate, or contradicted memories"
-                  : "Gemini key validation required before hygiene analysis")
+            .help(hygieneToolbarHelp)
             Button(action: exportMemories) {
                 Label("Export", systemImage: "square.and.arrow.up")
             }
             Button(action: importMemories) {
-                Label("Import", systemImage: "square.and.arrow.down")
+                Label("Import", systemImage: model.importIsActive
+                      ? "square.and.arrow.down.badge.clock"
+                      : "square.and.arrow.down")
             }
-            .disabled(model.importProgress != nil)
+            .disabled(model.importIsActive)
+            .help(model.importIsActive
+                  ? "Import in progress — cancel from the activity bar"
+                  : "Import memories from a JSON/JSONL file")
             Button { model.openNew() } label: {
                 Label("New Memory", systemImage: "plus")
             }
             .keyboardShortcut("n", modifiers: .command)
         }
+    }
+
+    private var ingestToolbarIcon: String {
+        if model.ingestIsActive { return "tray.and.arrow.down.fill" }
+        if model.pendingIngestBatch != nil { return "clock.arrow.circlepath" }
+        return model.ingestionIsReady ? "tray.and.arrow.down" : "exclamationmark.triangle.fill"
+    }
+
+    private var ingestToolbarHelp: String {
+        if model.ingestIsActive {
+            return "Ingestion running — open for details, or cancel from the activity bar"
+        }
+        if model.pendingIngestBatch != nil {
+            return "A batch ingestion job is waiting to be collected"
+        }
+        return model.ingestionIsReady
+            ? "Ingest new coding-agent sessions as memories"
+            : "Gemini key validation required before ingestion"
+    }
+
+    private var hygieneToolbarIcon: String {
+        if model.hygieneIsActive { return "sparkles" }
+        return model.hygieneIsReady ? "sparkles" : "exclamationmark.triangle.fill"
+    }
+
+    private var hygieneToolbarHelp: String {
+        if model.hygieneIsActive {
+            return "Hygiene analysis running — open for details, or cancel from the activity bar"
+        }
+        return model.hygieneIsReady
+            ? "Find stale, duplicate, or contradicted memories"
+            : "Gemini key validation required before hygiene analysis"
     }
 
     /// The backend badge carries its own glass pill, so opt it out of the
