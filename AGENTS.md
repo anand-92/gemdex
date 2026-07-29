@@ -69,12 +69,26 @@ Two facts that explain most of the codebase:
 | `packages/server` | `gemdex-server` | Self-hosted BYOI backend: thin `node:http` shell (`/v1`, auth, CORS, migrations) over Postgres/pgvector + file/S3 blobs, server-side embedding. | [server/AGENTS.md](packages/server/AGENTS.md) |
 | `packages/mcp-http` | `gemdex-mcp-http` | **Python.** The Streamable HTTP MCP surface (FastMCP v4) at `/mcp` for remote agents; OAuth 2.1 single-user auth. Thin wrapper over the BYOI `/v1` API — cannot import core. | [mcp-http/AGENTS.md](packages/mcp-http/AGENTS.md) |
 | `packages/web` | `gemdex-web` | **Python + React.** The browser manager UI: a Vite/TS SPA over a FastAPI backend-for-frontend. Google single-user login; the self-host manage surface, and it has delete. | [web/AGENTS.md](packages/web/AGENTS.md) |
-| `packages/app` | — | Native SwiftUI macOS manage-only app; spawns the sidecar and is a thin HTTP client. Swift, not TS. | [app/AGENTS.md](packages/app/AGENTS.md) |
+| `packages/app` | — | Native SwiftUI macOS manage-only app; spawns the sidecar and is a thin HTTP client. Swift, not TS. **Maintenance-only** — `packages/web` is the primary manage surface; keep this working, don't delete it, land new manage features in `web`. | [app/AGENTS.md](packages/app/AGENTS.md) |
 
-`docs/` holds the BYOI operations guide, the remote-mode wire contract, and the
-[self-host deploy guide](docs/SELF_HOST_DEPLOY.md). `deploy/` is the reference
-Compose stack for the full setup — BYOI + MCP (agents) + web manager (humans)
-behind a public HTTPS edge — see [deploy/README.md](deploy/README.md).
+`deploy/` is the reference Compose stack for the full setup — BYOI + MCP (agents)
++ web manager (humans) behind a public HTTPS edge — see
+[deploy/README.md](deploy/README.md). `scripts/install.sh` is the one-line
+installer that stands that stack up locally.
+
+`docs/` map:
+
+| Doc | What it is |
+|-----|------------|
+| [BYOI_OPERATIONS.md](docs/BYOI_OPERATIONS.md) | Operating a BYOI backend; security and custody model |
+| [BYOI_REMOTE_MODE.md](docs/BYOI_REMOTE_MODE.md) | The `/v1` wire contract: auth, attachments, compat floor, ranking invariants |
+| [SELF_HOST_DEPLOY.md](docs/SELF_HOST_DEPLOY.md) | Canonical end-to-end public deploy: Compose, Google OAuth, HTTPS edge, exposure proof |
+| [GO_FURTHER.md](docs/GO_FURTHER.md) | DNS/TLS, Render, Railway, VPS, local-vs-cloud split, cost/sizing |
+| [SECURITY_SELFHOST.md](docs/SECURITY_SELFHOST.md) | What the deployment enforces and where in the code; pre-launch checklist |
+| [CHAT_HISTORY.md](docs/CHAT_HISTORY.md) | The three ingestion paths (`sync-history`, web upload, host-local) and the deterministic-id invariant |
+
+When you change auth, exposure, or ingestion behaviour, `SECURITY_SELFHOST.md`
+and `CHAT_HISTORY.md` cite specific code paths — update them with the code.
 
 ## Cross-cutting mechanics (where to look)
 

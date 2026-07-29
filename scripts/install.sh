@@ -830,7 +830,9 @@ JSON
 
     printf '  Going beyond your LAN — public domain, TLS, Cloudflare Tunnel, and\n'
     printf '  Google login instead of the shared bearer:\n'
-    printf '    https://github.com/%s/blob/main/docs/SELF_HOST_DEPLOY.md\n\n' "$REPO"
+    printf '    https://github.com/%s/blob/main/docs/SELF_HOST_DEPLOY.md\n' "$REPO"
+    printf '  Managed platforms (Render, Railway), cost and sizing:\n'
+    printf '    https://github.com/%s/blob/main/docs/GO_FURTHER.md\n\n' "$REPO"
 
     printf '  %sManage the stack%s\n' "$C_BOLD" "$C_RESET"
     printf '    cd %s\n' "$DEPLOY_DIR"

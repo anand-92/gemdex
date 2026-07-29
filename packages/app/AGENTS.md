@@ -1,5 +1,10 @@
 # AGENTS.md — `packages/app` (Gemdex Memory, macOS)
 
+> **Status: maintenance-only.** This app is not the primary manage surface any
+> more — `packages/web` is, for self-hosted deployments. Keep this code working
+> and fix bugs here, but land new manage features in `packages/web` unless the
+> request is specifically about the macOS app. **Do not delete this package.**
+
 Architecture quick-reference for the **native SwiftUI manage-only macOS app**.
 It is a **thin HTTP client over a Node sidecar** and holds **no memory logic of
 its own** — all retrieval/embedding/storage lives in the sidecar (`gemdex serve`

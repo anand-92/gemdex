@@ -9,6 +9,10 @@ The end state: `https://gemdex.example.com/mcp` serves agents,
 `https://gemdex.example.com/` serves you, and Postgres and the BYOI bearer are
 not routable from the internet.
 
+Related guides: [what this actually enforces and the pre-launch
+checklist](SECURITY_SELFHOST.md) · [managed platforms, cost, and what stays
+local](GO_FURTHER.md) · [chat-history ingestion paths](CHAT_HISTORY.md).
+
 ## The shape
 
 ```
@@ -475,6 +479,9 @@ you upload after having synced it is **updated, not duplicated** — mixing the 
 paths is safe. If uploads answer `503`, `GEMINI_API_KEY` is missing from
 `gemdex-server`'s environment (recall and browsing keep working; only digesting
 needs it).
+
+For a side-by-side comparison of both paths (plus host-local `ingest-history`)
+and guidance on which to use, see [chat-history ingestion](CHAT_HISTORY.md).
 
 ## 6. Verify the memory plane is NOT public
 
