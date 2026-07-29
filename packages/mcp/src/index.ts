@@ -88,11 +88,13 @@ failed or gone stale before. Setting \`GEMDEX_TRUST_RANKING=true\` additionally
 re-ranks results by that track record (off by default; ranking stays pure
 relevance until you opt in).
 
-If a recalled memory includes a "Full transcript:" path (often a .jsonl session
-log) and the summary does not answer the user's question with enough detail,
-read that transcript directly before concluding. Treat transcript paths as
-supporting evidence for the memory, especially when the user asks for exact
-prior code, commands, comparisons, or session details.
+Chat digests often attach the full session as a non-embedded \`file\` attachment
+(caption "Full transcript (source file)"). Prefer \`read_attachment\` with the
+memory id to fetch that transcript over HTTP (works in remote/BYOI mode with no
+local path and no GEMINI_API_KEY). When a "Full transcript:" filesystem path is
+present and the file exists on this machine, reading that path is also fine.
+Treat the transcript as supporting evidence for exact prior code, commands, or
+session details when the digest summary is not enough.
 `;
 
 const LIST_MEMORIES_DESCRIPTION = `
@@ -155,6 +157,20 @@ Recorded locally in a per-client ledger keyed by memory id (not written back
 into the memory itself). With \`GEMDEX_TRUST_RANKING=true\` it also adjusts
 future \`recall\` ranking — proven memories rank higher, memories that have
 burned the agent rank lower.
+`;
+
+const READ_ATTACHMENT_DESCRIPTION = `
+Read the bytes of an attachment on a stored memory as text (UTF-8) or base64.
+
+🎯 **When to use**: after \`recall\` / \`list_memories\` shows a memory with
+attachments — especially chat digests that include a \`file\` attachment captioned
+"Full transcript (source file)". Prefer this over opening a local path when
+running in remote mode (BYOI): the bytes live in the server blob store and are
+fetched over HTTP. No GEMINI_API_KEY required.
+
+Args: \`memory_id\` (required), optional \`attachment_id\` (omit when there is
+exactly one attachment, or a single transcript/\`file\` attachment), optional
+\`max_chars\` (default ~1.5M; truncates with a clear overflow note).
 `;
 
 // JSON-schema fragment for the optional media array shared by save_memory /
@@ -350,6 +366,28 @@ class GemdexMemoryServer {
                         required: ["id", "outcome"],
                     },
                 },
+                {
+                    name: MCP_TOOL_NAMES[5],
+                    description: READ_ATTACHMENT_DESCRIPTION,
+                    inputSchema: {
+                        type: "object",
+                        properties: {
+                            memory_id: {
+                                type: "string",
+                                description: "Id of the parent memory (from save_memory, recall, or list_memories).",
+                            },
+                            attachment_id: {
+                                type: "string",
+                                description: "Optional attachment id. Omit when the memory has a single attachment or a single Full transcript file attachment.",
+                            },
+                            max_chars: {
+                                type: "number",
+                                description: "Max characters of text/base64 to return (default 1500000). Truncates with an overflow note when exceeded.",
+                            },
+                        },
+                        required: ["memory_id"],
+                    },
+                },
             ],
         }));
 
@@ -366,6 +404,8 @@ class GemdexMemoryServer {
                     return await this.handlers.handleListMemories(args);
                 case MCP_TOOL_NAMES[4]:
                     return await this.handlers.handleReportOutcome(args);
+                case MCP_TOOL_NAMES[5]:
+                    return await this.handlers.handleReadAttachment(args);
                 default:
                     throw new Error(`Unknown tool: ${name}`);
             }

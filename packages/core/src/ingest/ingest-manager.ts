@@ -17,6 +17,11 @@ import {
 } from './digester';
 import { IngestLedgerStore } from './ingest-ledger';
 import { bucketSessionFiles, discoverSessionFiles } from './session-scanner';
+import {
+    attachTranscriptToRecord,
+    readTranscriptAttachment,
+    TRANSCRIPT_ATTACHMENT_CAPTION,
+} from './transcript-attachment';
 import { parseSessionFile } from './transcript-parser';
 import {
     IngestLedgerEntry,
@@ -434,13 +439,30 @@ export class IngestManager {
         const meta = request.sessionMeta;
         const memoryId = memoryIdForSession(meta);
         const now = Date.now();
-        const record: MemoryExportRecord = {
+        const content = renderDigestMemory(digest, meta);
+        // Digest text stays searchable/embeddable; full transcript is a
+        // non-embedded blob attachment so hybrid search is not polluted.
+        const transcript = readTranscriptAttachment(meta.filePath, {
+            caption: TRANSCRIPT_ATTACHMENT_CAPTION,
+        });
+        let record: MemoryExportRecord = {
             id: memoryId,
             title: digest.title,
-            content: renderDigestMemory(digest, meta),
+            content,
             createdAt: meta.firstTs ?? now,
             updatedAt: meta.lastTs ?? now,
+            ...(transcript ? { attachments: [transcript] } : {}),
         };
+        // If the explicit path failed, still try the content footer (same path).
+        if (!transcript) {
+            const attached = attachTranscriptToRecord(record, { filePath: meta.filePath, force: true });
+            record = attached.record;
+            if (attached.status === 'missing') {
+                console.error(
+                    `[ingest] transcript file missing for ${memoryId}; saving digest without attachment: ${meta.filePath}`,
+                );
+            }
+        }
         const result = await backend.importRecords([record]);
         if (result.imported !== 1) {
             const detail = result.errors[0]?.error;

@@ -1,10 +1,12 @@
 import { HybridSubScores } from '../vectordb';
 
 /**
- * The media modalities `gemini-embedding-2` accepts as inline content. Each
- * supported mimeType maps to exactly one of these (see attachment-validator).
+ * Attachment modalities. `image`/`audio`/`video`/`pdf` are embedded by
+ * gemini-embedding-2. `file` is blob-only (non-embedded) — used for full chat
+ * transcripts and other raw source files that must not pollute hybrid search
+ * or burn embedding tokens.
  */
-export type AttachmentKind = 'image' | 'audio' | 'video' | 'pdf';
+export type AttachmentKind = 'image' | 'audio' | 'video' | 'pdf' | 'file';
 
 /**
  * Inline media supplied by a caller when saving/updating a memory. `data` is
@@ -12,6 +14,12 @@ export type AttachmentKind = 'image' | 'audio' | 'video' | 'pdf';
  * branch for this attachment (falls back to the memory title when omitted).
  */
 export interface MemoryAttachmentInput {
+    /**
+     * Optional stable id within the parent memory. When omitted, the store
+     * assigns the attachment's ordinal as a string (`"0"`, `"1"`, …). Prefer a
+     * fixed id (e.g. `transcript`) for idempotent re-import of known slots.
+     */
+    id?: string;
     mimeType: string;
     /** base64-encoded bytes. */
     data: string;

@@ -386,6 +386,51 @@ describe('MemoryStore (attachments)', () => {
         expect(await store.readAttachment(mem.id, 'no-such-att')).toBeNull();
     });
 
+    it('stores file (transcript) attachments as blobs without multimodal embedding of the body', async () => {
+        const body = 'a'.repeat(5000);
+        const mem = await store.save({
+            content: 'Digest summary only\n\n---\nFull transcript: /tmp/x.jsonl\n',
+            title: 'Digest',
+            attachments: [{
+                mimeType: 'application/x-ndjson',
+                data: Buffer.from(body).toString('base64'),
+                caption: 'Full transcript (source file)',
+            }],
+        });
+        expect(mem.attachments).toHaveLength(1);
+        expect(mem.attachments[0].kind).toBe('file');
+        expect(mem.content).not.toContain(body);
+        expect(mem.content).toContain('Digest summary only');
+
+        const blob = await store.readAttachment(mem.id, mem.attachments[0].id);
+        expect(blob!.data.toString()).toBe(body);
+
+        // Text-only embedding models still accept blob-only file attachments.
+        const textStore = new MemoryStore({
+            embedding: new FakeEmbedding(),
+            vectorDatabase: new LanceDBVectorDatabase({ uri: dbDir }),
+            blobStore: new FileBlobStore(blobDir),
+        });
+        const fileOnly = await textStore.importRecords([{
+            id: 'chat:factory:no-embed',
+            title: 'T',
+            content: 'summary',
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            attachments: [{
+                id: 'transcript',
+                mimeType: 'text/plain',
+                data: Buffer.from('transcript body').toString('base64'),
+                caption: 'Full transcript (source file)',
+            }],
+        }]);
+        expect(fileOnly.imported).toBe(1);
+        const got = await textStore.get('chat:factory:no-embed');
+        expect(got?.attachments[0].kind).toBe('file');
+        expect((await textStore.readAttachment('chat:factory:no-embed', 'transcript'))?.data.toString())
+            .toBe('transcript body');
+    });
+
     it('rejects attachments when the embedding is not multimodal', async () => {
         const db = new LanceDBVectorDatabase({ uri: dbDir });
         const textStore = new MemoryStore({

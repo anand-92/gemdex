@@ -104,10 +104,53 @@ test('migrations create a clean database from scratch and record bookkeeping', a
         const migrations = await pool.query<{ version: string }>(
             'SELECT version FROM gemdex_schema_migrations ORDER BY version',
         );
-        assert.deepEqual(migrations.rows.map((row) => row.version), ['001', '002']);
+        assert.deepEqual(migrations.rows.map((row) => row.version), ['001', '002', '003']);
     } finally {
         await pool.end();
     }
+});
+
+test('importRecords accepts chat: deterministic ids and file transcript attachments', async () => {
+    await withMigratedBackend(async (backend) => {
+        const transcriptBody = '{"type":"user","message":"hello"}\n{"type":"assistant","message":"hi"}\n';
+        const digestContent =
+            'Source: Factory CLI · 2026-01-01\nDid the work.\n\n---\n' +
+            'Full transcript: /tmp/fake-session.jsonl\n(read this file for the verbatim session)';
+        const result = await backend.importRecords([{
+            id: 'chat:factory:test-session-1',
+            title: 'Test digest',
+            content: digestContent,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            attachments: [{
+                id: 'transcript',
+                mimeType: 'application/x-ndjson',
+                data: Buffer.from(transcriptBody).toString('base64'),
+                caption: 'Full transcript (source file)',
+            }],
+        }]);
+        assert.deepEqual(result, { imported: 1, failed: 0, errors: [] });
+
+        const memory = await backend.get('chat:factory:test-session-1');
+        assert.ok(memory);
+        assert.equal(memory.id, 'chat:factory:test-session-1');
+        assert.equal(memory.content.includes(transcriptBody), false);
+        assert.equal(memory.attachments.length, 1);
+        assert.equal(memory.attachments[0].kind, 'file');
+        assert.equal(memory.attachments[0].caption, 'Full transcript (source file)');
+
+        const blob = await backend.readAttachment('chat:factory:test-session-1', 'transcript');
+        assert.ok(blob);
+        assert.equal(blob.data.toString('utf8'), transcriptBody);
+
+        // Real UUID-style ids still work after TEXT migration.
+        const uuidish = await backend.save({ content: 'ordinary memory with uuid id' });
+        assert.match(uuidish.id, /^[0-9a-f-]{36}$/i);
+        assert.equal((await backend.get(uuidish.id))?.content, 'ordinary memory with uuid id');
+
+        await backend.delete('chat:factory:test-session-1');
+        assert.equal(await backend.get('chat:factory:test-session-1'), null);
+    });
 });
 
 test('PostgresMemoryBackend persists save/update/delete/list/export/import across backend instances', async () => {

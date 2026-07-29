@@ -58,7 +58,8 @@ test("rejects a missing file", async () => {
 
 test("rejects a path with an unknown extension and no explicit mimeType", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gemdex-att-"));
-    const file = path.join(tmp, "notes.txt");
+    // .gif is intentionally unsupported (unlike .txt/.jsonl which map to blob-only file).
+    const file = path.join(tmp, "notes.gif");
     fs.writeFileSync(file, "hi");
     try {
         await assert.rejects(

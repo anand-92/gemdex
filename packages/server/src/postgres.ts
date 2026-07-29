@@ -10,6 +10,7 @@ import {
     Embedding,
     ImportRecordError,
     ImportRecordsResult,
+    isEmbeddableAttachmentKind,
     Memory,
     MemoryAttachment,
     MemoryAttachmentInput,
@@ -569,18 +570,30 @@ export class PostgresMemoryBackend implements MemoryBackend {
             ...(attachment.caption && { caption: attachment.caption }),
         }));
         const title = resolveTitle(explicitTitle, text, prepared);
-        const chunks = text.trim().length > 0 ? chunkMemory(text) : [];
+        // Blob-only `file` attachments (transcripts) are never embedded.
+        const embeddablePrepared = prepared.filter((attachment) => isEmbeddableAttachmentKind(attachment.kind));
+        let chunks = text.trim().length > 0 ? chunkMemory(text) : [];
+        if (chunks.length === 0 && embeddablePrepared.length === 0 && prepared.length > 0) {
+            chunks = [title];
+        }
         const textEmbeddings = this.embedding && chunks.length > 0
             ? await this.embedding.embedBatch(chunks)
             : [];
-        const attachmentEmbeddings = this.embedding && prepared.length > 0
-            ? await this.embedding.embedContentBatch(prepared.map((attachment) => ({
+        const attachmentEmbeddings = this.embedding && embeddablePrepared.length > 0
+            ? await this.embedding.embedContentBatch(embeddablePrepared.map((attachment) => ({
                 inlineData: {
                     mimeType: attachment.mimeType,
                     data: attachment.data.toString('base64'),
                 },
             })))
             : [];
+        // Map dense vectors by attachment id so rebuildAttachmentChunks can skip
+        // file kinds and still align embeddings with the remaining media rows.
+        const embeddingsByAttachmentId = new Map<string, number[]>();
+        for (let i = 0; i < embeddablePrepared.length; i++) {
+            const vector = attachmentEmbeddings[i]?.vector;
+            if (vector) embeddingsByAttachmentId.set(embeddablePrepared[i].id, vector);
+        }
         const client = await this.pool.connect();
         const externalRefs = new Map<string, string>();
 
@@ -656,7 +669,7 @@ export class PostgresMemoryBackend implements MemoryBackend {
                     ],
                 );
             }
-            await this.rebuildAttachmentChunks(client, id, attachmentEmbeddings.map((item) => item.vector));
+            await this.rebuildAttachmentChunks(client, id, embeddingsByAttachmentId);
 
             await client.query('COMMIT');
             const memory = await this.get(id);
@@ -670,12 +683,17 @@ export class PostgresMemoryBackend implements MemoryBackend {
         }
     }
 
+    /**
+     * Rebuild attachment retrieval chunks. Embeddable media get dense vectors;
+     * blob-only `file` attachments are omitted from the chunk table entirely
+     * (bytes stay in gemdex_memory_attachments + blob store only).
+     */
     private async rebuildAttachmentChunks(
         db: Queryable,
         id: string,
-        embeddings?: number[][],
+        embeddingsByAttachmentId?: Map<string, number[] | string | null>,
     ): Promise<void> {
-        const priorEmbeddings = embeddings === undefined
+        const priorEmbeddings = embeddingsByAttachmentId === undefined
             ? await db.query<{ attachment_id: string; embedding_vector: string | number[] | null }>(
                 `SELECT attachment_id, embedding_vector
                  FROM gemdex_memory_chunks
@@ -701,9 +719,24 @@ export class PostgresMemoryBackend implements MemoryBackend {
         const title = doc.rows[0]?.title ?? '';
         const createdAt = doc.rows[0]?.created_at ?? new Date();
         const updatedAt = doc.rows[0]?.updated_at ?? new Date();
-        for (let i = 0; i < result.rows.length; i++) {
-            const attachment = result.rows[i];
+        let chunkIndex = 0;
+        for (const attachment of result.rows) {
+            // Non-embedded source files: metadata + blob only, no retrieval chunk.
+            if (attachment.kind === 'file') continue;
             const text = attachment.caption?.trim() || title || `${attachment.kind} attachment`;
+            let embedding: string | number[] | null = null;
+            if (embeddingsByAttachmentId !== undefined) {
+                const supplied = embeddingsByAttachmentId.get(attachment.id);
+                if (Array.isArray(supplied)) {
+                    embedding = vectorLiteral(supplied);
+                } else if (typeof supplied === 'string') {
+                    embedding = supplied;
+                } else {
+                    embedding = null;
+                }
+            } else {
+                embedding = priorByAttachment.get(attachment.id) ?? null;
+            }
             await db.query(
                 `INSERT INTO gemdex_memory_chunks
                     (id, memory_id, attachment_id, chunk_index, chunk_kind, content,
@@ -713,13 +746,14 @@ export class PostgresMemoryBackend implements MemoryBackend {
                     randomUUID(),
                     id,
                     attachment.id,
-                    i,
+                    chunkIndex,
                     text,
-                    embeddings?.[i] ? vectorLiteral(embeddings[i]) : priorByAttachment.get(attachment.id) ?? null,
+                    embedding,
                     createdAt,
                     updatedAt,
                 ],
             );
+            chunkIndex += 1;
         }
     }
 

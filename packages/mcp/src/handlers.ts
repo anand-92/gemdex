@@ -18,6 +18,40 @@ function textResult(text: string, isError = false): ToolResult {
     return { content: [{ type: "text", text }], ...(isError && { isError: true }) };
 }
 
+/** Default max characters returned by `read_attachment` (~1.5 MiB of UTF-8 text). */
+export const DEFAULT_READ_ATTACHMENT_MAX_CHARS = 1_500_000;
+
+const TEXTISH_MIME_PREFIXES = ['text/', 'application/json', 'application/x-ndjson', 'application/jsonl'];
+
+function isTextishMime(mimeType: string): boolean {
+    const lower = mimeType.toLowerCase();
+    return TEXTISH_MIME_PREFIXES.some((p) => lower === p || lower.startsWith(p))
+        || lower.includes('json')
+        || lower === 'application/xml'
+        || lower.endsWith('+json')
+        || lower.endsWith('+xml');
+}
+
+/**
+ * Pick a default attachment when the agent omits `attachment_id`:
+ * 1. sole attachment on the memory
+ * 2. sole `file` kind (transcripts)
+ * 3. sole caption matching /transcript/i
+ * Otherwise returns null so the handler asks the agent to choose.
+ */
+function pickDefaultAttachmentId(
+    attachments: Array<{ id: string; kind: string; caption?: string }>,
+): string | null {
+    if (attachments.length === 1) return attachments[0].id;
+    const files = attachments.filter((a) => a.kind === 'file');
+    if (files.length === 1) return files[0].id;
+    const transcripts = attachments.filter(
+        (a) => typeof a.caption === 'string' && /transcript/i.test(a.caption),
+    );
+    if (transcripts.length === 1) return transcripts[0].id;
+    return null;
+}
+
 /**
  * Validate the optional `attachments` argument shared by all three tools.
  * Returns the array (or undefined when absent), or an error ToolResult to
@@ -431,6 +465,113 @@ export class MemoryToolHandlers {
             return textResult(formatMemoryResult('Updated', memory));
         } catch (error) {
             return textResult(`Failed to update memory: ${errorMessage(error)}`, true);
+        }
+    }
+
+    /**
+     * Read attachment bytes for a memory (local blob store or remote HTTP).
+     * Used for chat digests that store the full transcript as a non-embedded
+     * `file` attachment, and for any other attachment agents need as text/base64.
+     *
+     * Args: `memory_id` (required), optional `attachment_id`, optional `max_chars`
+     * (default ~1.5M chars). When `attachment_id` is omitted, prefers a single
+     * transcript/`file` attachment, else the only attachment on the memory.
+     */
+    async handleReadAttachment(args: any): Promise<ToolResult> {
+        const memoryId = typeof args?.memory_id === 'string'
+            ? args.memory_id
+            : (typeof args?.memoryId === 'string' ? args.memoryId : '');
+        if (memoryId.trim().length === 0) {
+            return textResult("Error: 'memory_id' is required.", true);
+        }
+        const explicitAttachmentId = typeof args?.attachment_id === 'string'
+            ? args.attachment_id
+            : (typeof args?.attachmentId === 'string' ? args.attachmentId : undefined);
+        const maxCharsRaw = args?.max_chars ?? args?.maxChars;
+        const maxChars = typeof maxCharsRaw === 'number' && Number.isFinite(maxCharsRaw) && maxCharsRaw > 0
+            ? Math.floor(maxCharsRaw)
+            : DEFAULT_READ_ATTACHMENT_MAX_CHARS;
+
+        try {
+            const memory = await this.store.get(memoryId);
+            if (!memory) {
+                return textResult(`Failed to read attachment: Memory not found: ${memoryId}`, true);
+            }
+            if (!memory.attachments || memory.attachments.length === 0) {
+                return textResult(
+                    `Failed to read attachment: Memory ${memoryId} has no attachments.` +
+                    (memory.content.includes('Full transcript:')
+                        ? ' Digest still has a local path footer — use read_attachment after backfill, or open the path when local.'
+                        : ''),
+                    true,
+                );
+            }
+
+            const attachmentId = explicitAttachmentId?.trim()
+                ? explicitAttachmentId.trim()
+                : pickDefaultAttachmentId(memory.attachments);
+            if (!attachmentId) {
+                const listed = memory.attachments
+                    .map((a) => `${a.id} (${a.kind}${a.caption ? `: "${a.caption}"` : ''})`)
+                    .join(', ');
+                return textResult(
+                    `Error: multiple attachments; pass 'attachment_id'. Available: ${listed}`,
+                    true,
+                );
+            }
+
+            const meta = memory.attachments.find((a) => a.id === attachmentId);
+            if (!meta) {
+                const listed = memory.attachments.map((a) => a.id).join(', ');
+                return textResult(
+                    `Failed to read attachment: Attachment ${attachmentId} not found on ${memoryId}. Available: ${listed}`,
+                    true,
+                );
+            }
+
+            const bytes = await this.store.readAttachment(memoryId, attachmentId);
+            if (!bytes) {
+                return textResult(
+                    `Failed to read attachment: Blob missing for ${memoryId}/${attachmentId}.`,
+                    true,
+                );
+            }
+
+            const header = [
+                `Attachment ${attachmentId} of memory ${memoryId}`,
+                `kind: ${meta.kind}`,
+                `mimeType: ${bytes.mimeType}`,
+                `byteLength: ${bytes.byteLength}`,
+                ...(bytes.caption ? [`caption: ${bytes.caption}`] : []),
+            ].join('\n');
+
+            if (isTextishMime(bytes.mimeType)) {
+                const text = bytes.data.toString('utf8');
+                if (text.length <= maxChars) {
+                    return textResult(`${header}\nencoding: utf-8\n\n${text}`);
+                }
+                const truncated = text.slice(0, maxChars);
+                return textResult(
+                    `${header}\nencoding: utf-8\ntruncated: true\n` +
+                    `showingChars: ${maxChars} of ${text.length}\n` +
+                    `(raise max_chars to read more; default is ${DEFAULT_READ_ATTACHMENT_MAX_CHARS})\n\n` +
+                    truncated,
+                );
+            }
+
+            const b64 = bytes.data.toString('base64');
+            const maxB64Chars = maxChars;
+            if (b64.length <= maxB64Chars) {
+                return textResult(`${header}\nencoding: base64\n\n${b64}`);
+            }
+            return textResult(
+                `${header}\nencoding: base64\ntruncated: true\n` +
+                `showingChars: ${maxB64Chars} of ${b64.length} (base64)\n` +
+                `(raise max_chars to read more)\n\n` +
+                b64.slice(0, maxB64Chars),
+            );
+        } catch (error) {
+            return textResult(`Failed to read attachment: ${errorMessage(error)}`, true);
         }
     }
 

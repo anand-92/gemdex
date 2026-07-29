@@ -220,6 +220,47 @@ the `gemdex_gemdex-postgres` volume and does not publish the database port.
 One deployment is one global memory pool. There are no per-repository scopes,
 tags, or tenant columns, and timestamps never influence recall ranking.
 
+Memory document ids are **TEXT** (migration `003`). Deterministic digest ids
+such as `chat:factory:<sessionId>` import and persist as-is; real UUID strings
+remain valid. Attachment kind also allows `file` for non-embedded source blobs
+(full chat transcripts).
+
+### Option C — chat digests + transcript attachments (redeploy / re-import)
+
+After deploying a build that includes migration `003` and the transcript
+attachment path:
+
+1. **Rebuild and restart the server** so migrations apply:
+
+   ```sh
+   cd packages/server
+   docker compose up -d --build
+   # or: docker compose run --rm gemdex-server migrate
+   curl --fail http://127.0.0.1:8765/v1/health
+   ```
+
+2. **Import / re-import local digests with transcript blobs**. Prefer attaching
+   transcripts during import (parses each digest’s `Full transcript: <path>`
+   footer; missing files are skipped with a message, not a hard failure):
+
+   ```sh
+   # From a machine that still has ~/.gemdex Lance data + the transcript files:
+   gemdex import-local-to-remote production --attach-transcripts
+
+   # Or re-attach on the active backend (local or remote):
+   gemdex backfill-transcripts --dry-run
+   gemdex backfill-transcripts          # active backend
+   gemdex backfill-transcripts production
+   ```
+
+3. **MCP clients** pick up `read_attachment` automatically after upgrading
+   `gemdex-mcp`. No config change is required. Agents should use
+   `read_attachment` with the digest memory id to fetch the full transcript in
+   remote mode (no local path, no `GEMINI_API_KEY`).
+
+New `ingest-history` runs attach the transcript on first save. Re-ingest of
+already-ledgersed sessions remains intentionally disabled (new-sessions-only).
+
 ### File Attachment Storage
 
 The default `BLOB_STORE=file` stores raw attachment bytes in

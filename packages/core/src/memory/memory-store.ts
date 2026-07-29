@@ -14,6 +14,7 @@ import {
     AttachmentLimits,
     DEFAULT_ATTACHMENT_LIMITS,
     ValidatedAttachment,
+    isEmbeddableAttachmentKind,
     mimeToKind,
     validateAttachments,
 } from './attachment-validator';
@@ -198,24 +199,36 @@ export class MemoryStore {
         }));
     }
 
+    /**
+     * Build hybrid vector rows for embeddable media only. Blob-only `file`
+     * attachments live in parent metadata + BlobStore and must not enter the
+     * vector table (no dense/BM25 pollution from multi-MB transcripts).
+     */
     private buildAttachmentRows(
         parentId: string,
         stored: StoredAttachment[],
-        vectors: EmbeddingVector[],
+        vectorsByStoredIndex: Map<number, EmbeddingVector>,
         meta: ParentMeta,
     ): VectorDocument[] {
         const record = this.metaToRecord(meta);
-        return stored.map((att, index) => ({
-            id: MemoryStore.attachmentRowId(parentId, index),
-            vector: vectors[index].vector,
-            // BM25 text for a media row is its caption, falling back to the title.
-            content: att.caption ?? meta.title,
-            relativePath: parentId,
-            startLine: index,
-            endLine: stored.length,
-            fileExtension: '',
-            metadata: record,
-        }));
+        const rows: VectorDocument[] = [];
+        for (let index = 0; index < stored.length; index++) {
+            const vector = vectorsByStoredIndex.get(index);
+            if (!vector) continue;
+            const att = stored[index];
+            rows.push({
+                id: MemoryStore.attachmentRowId(parentId, index),
+                vector: vector.vector,
+                // BM25 text for a media row is its caption, falling back to the title.
+                content: att.caption ?? meta.title,
+                relativePath: parentId,
+                startLine: index,
+                endLine: stored.length,
+                fileExtension: '',
+                metadata: record,
+            });
+        }
+        return rows;
     }
 
     private async embedChunks(chunks: string[]): Promise<EmbeddingVector[]> {
@@ -251,7 +264,7 @@ export class MemoryStore {
         if (!raw || typeof raw !== 'object') return null;
         const r = raw as Record<string, any>;
         if (typeof r.blobRef !== 'string' || typeof r.mimeType !== 'string') return null;
-        const kinds: AttachmentKind[] = ['image', 'audio', 'video', 'pdf'];
+        const kinds: AttachmentKind[] = ['image', 'audio', 'video', 'pdf', 'file'];
         const kind = kinds.includes(r.kind) ? (r.kind as AttachmentKind) : mimeToKind(r.mimeType);
         if (!kind) return null;
         const caption = typeof r.caption === 'string' && r.caption.length > 0 ? r.caption : undefined;
@@ -315,7 +328,9 @@ export class MemoryStore {
             ? await validateAttachments(attachmentsInput, this.attachmentLimits)
             : [];
 
-        if (validated.length > 0 && !this.embedding.isMultimodal()) {
+        // Only media kinds need a multimodal model; blob-only `file` attachments do not.
+        const embeddable = validated.filter((att) => isEmbeddableAttachmentKind(att.kind));
+        if (embeddable.length > 0 && !this.embedding.isMultimodal()) {
             throw new Error(
                 'Attachments require a multimodal embedding model (e.g. gemini-embedding-2); ' +
                 `the current ${this.embedding.getProvider()} model does not accept inline media.`,
@@ -335,23 +350,47 @@ export class MemoryStore {
         // vectors before deleting the prior rows/blobs means a failed
         // update/import leaves the existing memory intact instead of destroying
         // it. (Overwrite is still not fully atomic, but the failure window
-        // shrinks to the local LanceDB insert.)
-        const chunks = text.trim().length > 0 ? chunkMemory(text, this.chunkOptions) : [];
+        // shrinks to the local LanceDB insert.) Blob-only `file` attachments
+        // are deliberately skipped so multi-MB transcripts never hit the API.
+        let chunks = text.trim().length > 0 ? chunkMemory(text, this.chunkOptions) : [];
+        // File-only memories (no text, no media) still need one parent vector
+        // row for get/list/delete grouping — index the title only, never the file body.
+        if (chunks.length === 0 && embeddable.length === 0 && validated.length > 0) {
+            chunks = [title];
+        }
         const chunkVectors = await this.embedChunks(chunks);
-        const attachmentVectors = await this.embedAttachments(validated);
+        const embeddableVectors = await this.embedAttachments(embeddable);
+        const vectorsByStoredIndex = new Map<number, EmbeddingVector>();
+        let embeddableCursor = 0;
+        for (let i = 0; i < validated.length; i++) {
+            if (!isEmbeddableAttachmentKind(validated[i].kind)) continue;
+            vectorsByStoredIndex.set(i, embeddableVectors[embeddableCursor]);
+            embeddableCursor += 1;
+        }
+        // Returned to save-time similar-memory detection: only vectors that
+        // actually exist (text chunks + embeddable media).
+        const attachmentVectors = embeddableVectors;
 
         // Embedding succeeded — only now is it safe to clear prior state for this id.
         await this.deleteChunkRows(id);
         await this.blobStore.deleteParent(id);
 
         try {
-            // Persist blob bytes so metadata can reference them.
+            // Persist blob bytes so metadata can reference them (including non-embedded files).
+            // Preserve caller-supplied attachment ids (e.g. "transcript") for idempotent re-import.
+            const usedIds = new Set<string>();
             const stored: StoredAttachment[] = [];
             for (let i = 0; i < validated.length; i++) {
                 const att = validated[i];
-                const blobRef = await this.blobStore.put(id, String(i), att.bytes);
+                const requestedId = attachmentsInput[i]?.id?.trim();
+                let attachmentId = requestedId && requestedId.length > 0 ? requestedId : String(i);
+                if (usedIds.has(attachmentId)) {
+                    attachmentId = `${attachmentId}-${i}`;
+                }
+                usedIds.add(attachmentId);
+                const blobRef = await this.blobStore.put(id, attachmentId, att.bytes);
                 stored.push({
-                    id: String(i),
+                    id: attachmentId,
                     kind: att.kind,
                     mimeType: att.mimeType,
                     byteLength: att.byteLength,
@@ -364,7 +403,7 @@ export class MemoryStore {
 
             const rows = [
                 ...this.buildChunkRows(id, chunks, chunkVectors, meta),
-                ...this.buildAttachmentRows(id, stored, attachmentVectors, meta),
+                ...this.buildAttachmentRows(id, stored, vectorsByStoredIndex, meta),
             ];
 
             await this.db.insertHybrid(this.collectionName, rows);
@@ -932,6 +971,7 @@ export class MemoryStore {
             const content = record.content ?? '';
             const attachmentsInput: MemoryAttachmentInput[] = Array.isArray(record.attachments)
                 ? record.attachments.map((a) => ({
+                    ...(typeof a.id === 'string' && a.id.trim().length > 0 && { id: a.id.trim() }),
                     mimeType: a.mimeType,
                     data: a.data,
                     ...(a.caption && { caption: a.caption }),

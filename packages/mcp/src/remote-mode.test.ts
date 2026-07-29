@@ -107,10 +107,10 @@ async function startFakeRemote(): Promise<{
     };
 }
 
-test('MCP public tool surface remains exactly save_memory, recall, update_memory, list_memories, report_outcome', () => {
+test('MCP public tool surface remains save_memory, recall, update_memory, list_memories, report_outcome, read_attachment', () => {
     assert.deepEqual(
         [...MCP_TOOL_NAMES],
-        ['save_memory', 'recall', 'update_memory', 'list_memories', 'report_outcome'],
+        ['save_memory', 'recall', 'update_memory', 'list_memories', 'report_outcome', 'read_attachment'],
     );
 });
 
