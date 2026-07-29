@@ -49,6 +49,12 @@ PROTECTED = [
     # is gated exactly like the rest — and the 401 must land before the file is
     # ever forwarded upstream.
     ("POST", "/api/sessions/upload"),
+    # Both describe the pool's contents — what was ingested and from which
+    # repos — so they leak just as much as the list route does.
+    ("GET", "/api/ingest/history"),
+    # Gated despite being static, config-shaped text: an unauthenticated caller
+    # learning the backend URL from the hygiene caveat is a free recon step.
+    ("GET", "/api/hygiene/status"),
 ]
 
 

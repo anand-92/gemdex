@@ -48,11 +48,14 @@ and it always uses the configured token.
 | `src/gemdex_web/auth.py` | **The single auth seam.** Google authorization-code flow, ID-token claim validation, the email allowlist, the `require_identity` dependency. |
 | `src/gemdex_web/routes.py` | The `/api` router. Every route sits behind `require_identity`. Owns search, pagination, and response projection. |
 | `src/gemdex_web/uploads.py` | Session-upload **decoding** only: multipart entries → transcripts, zip expansion, size/type limits. Pure, no network. |
+| `src/gemdex_web/ingest_history.py` | Reconstructs ingested sessions **from the pool** (`chat:*` ids + the digest header in `preview`) — there is no host-side ledger to read. Pure, no network. |
+| `src/gemdex_web/hygiene.py` | Static answer to "can hygiene run here?" (no) and where it can. Deliberately runs nothing. Pure, no network. |
 | `src/gemdex_web/app.py` | `create_app()` — session middleware, auth routes, API, SPA serving. |
 | `src/gemdex_web/server.py` | `main()` entrypoint: resolve config, print posture, run uvicorn. |
 | `frontend/src/api.ts` | The SPA's only `fetch` call site, plus the types that mirror the BFF's projections. |
 | `frontend/src/router.ts` | ~50-line hash router. **Extension point** — `upload` was added by adding one `Route` variant, one `parseRoute` case, one `App` branch. |
 | `frontend/src/views/UploadSessions.tsx` | The chat-session upload page (history path B). |
+| `frontend/src/views/IngestHistory.tsx` | Ingest history + the hygiene panel. Renders the BFF's caveat text verbatim rather than restating it. |
 
 ## Invariants that are easy to break
 
@@ -191,6 +194,54 @@ member called `../../etc/x.jsonl` becomes `x.jsonl` — nothing here writes to
 disk, but the name reaches the digest's provenance and the session-id fallback),
 and nested archives are skipped rather than recursed so depth is never
 attacker-controlled.
+
+### 8. Ingest history is *derived*, and hygiene deliberately has no button
+
+Two status surfaces (`ingest_history.py`, `hygiene.py`) that both had to answer
+"where does this data actually come from?" with something other than the obvious
+guess. Both are pure — neither module imports the client.
+
+**Ingest history has no ledger to read.** The instinct is to look for one; there
+isn't one on the host. `gemdex sync-history` writes `~/.gemdex/ingest.json` on
+each **laptop**, keyed by absolute path + mtime — meaningless to a host that
+never had those paths, and never transmitted. Web upload (path B) returns a
+per-request summary that the browser renders and drops. The memories are
+therefore the only durable host-side record, and the better one: it cannot drift
+from reality, and both ingest paths appear identically because both write the
+same kind of memory.
+
+What makes it precise is the deterministic `chat:<source>:<sessionId>` id — the
+`<source>` segment is authoritative because the ingester wrote it. Repo/branch
+are parsed out of the digest **header line**, which is the memory's first line
+and so survives into the 100-char `preview`. That is the reason the page is one
+`GET /v1/memories` and not 1278 fetches.
+
+- The preview truncates mid-header on long paths (18 of 1278 in the real pool),
+  so `_HEADER` must tolerate running off the end, and `_split_repo` strips a
+  **half-written** branch. Without the latter, one repo splits into several
+  summary rows — `/Users/nikhilanand/agent` showed up as 390 + 170 instead of
+  565. There is a test pinning this.
+- **Never label these timestamps "ingested at".** They are the session's own
+  first/last activity (`createdAt: meta.firstTs ?? now` in `ingest-manager.ts`;
+  `importRecords` preserves rather than restamps). Verified: 1278 chat memories
+  across 73 distinct days, each matching its own digest header's date. The host
+  cannot know when a laptop ran sync, so the route ships `timestampMeaning` and
+  the UI renders it verbatim.
+
+**Hygiene cannot run here, and the endpoint says so.** Phase-1 clustering reads
+row vectors through `MemoryStore.listParentsWithVectors()` — a **local LanceDB**
+method, not on the `MemoryBackend` interface, with no `PostgresMemoryBackend`
+equivalent and no `/v1` route. `serve.ts`'s `localStore()` rejects hygiene in
+remote mode explicitly. Making it work host-side means a new vector-listing
+route plus pgvector clustering: real new infrastructure, its own decision.
+
+So don't add a scan button. The endpoint instead reports the protections that
+genuinely exist — save-time similar-memory detection at `GEMDEX_SIMILAR_THRESHOLD`
+(`0.90`, the *same cosine scale* hygiene clusters on), the deterministic id that
+makes chat digests structurally un-duplicatable, and human-only deletion — plus
+the command for a real pass and the caveat that it covers a **different** pool.
+`hygiene/status` also takes **no** upstream call, so it keeps answering when the
+pool is down, same principle as `/api/status`.
 
 ## Other gotchas
 

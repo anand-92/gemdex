@@ -502,6 +502,121 @@ button.link {
     font-weight: 600;
 }
 
+/* --- ingest history + hygiene ------------------------------------------ */
+
+/* Per-agent session totals. A row of counts rather than a table: there are only
+   ever a handful of sources, and the numbers are the content. */
+.chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 0 0 14px;
+}
+
+.chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 4px 12px;
+    font-size: 0.85rem;
+    color: var(--muted);
+}
+
+.chip b {
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+}
+
+.repo-list,
+.session-list,
+.protection-list {
+    list-style: none;
+    margin: 0 0 18px;
+    padding: 0;
+}
+
+.repo-list li {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--border);
+}
+
+/* Repo paths are long and the interesting end is the last segment, so let them
+   truncate from the left rather than wrap to three lines. */
+.repo-list code {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    direction: rtl;
+    text-align: left;
+}
+
+.repo-list .meta {
+    font-variant-numeric: tabular-nums;
+    flex: none;
+}
+
+.session-list li {
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.session-list li > a {
+    font-weight: 550;
+}
+
+.session-list .meta,
+.protection-list .meta {
+    margin: 3px 0 0;
+}
+
+.protection-list li {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+    margin-bottom: 10px;
+}
+
+.protection-list strong {
+    margin-right: 8px;
+}
+
+.protection-list pre {
+    margin: 8px 0 0;
+}
+
+.badge-active {
+    color: var(--ok);
+}
+
+/* "by design" is not a warning — it is a deliberate property being reported, so
+   it reads as neutral rather than as something to fix. */
+.badge-by-design {
+    color: var(--muted);
+}
+
+/* A stated limitation, not an error: no red, but not invisible either. */
+.notice {
+    background: var(--panel);
+    border-left: 3px solid var(--warn);
+    border-radius: 0 var(--radius) var(--radius) 0;
+    padding: 10px 14px;
+    margin: 0 0 16px;
+}
+
+.section-break {
+    margin-top: 34px;
+    padding-top: 22px;
+    border-top: 1px solid var(--border);
+}
+
 /* --- feedback ---------------------------------------------------------- */
 
 .error {

@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { api, type Session } from './api';
 import { href, useRoute } from './router';
 import { CreateMemory } from './views/CreateMemory';
+import { IngestHistory } from './views/IngestHistory';
 import { MemoryDetail } from './views/MemoryDetail';
 import { MemoryList } from './views/MemoryList';
 import { Status } from './views/Status';
@@ -63,6 +64,7 @@ export function App(): React.JSX.Element {
                 <nav>
                     <a href={href.create()}>New</a>
                     <a href={href.upload()}>Upload sessions</a>
+                    <a href={href.history()}>History</a>
                     <a href={href.status()}>Status</a>
                     {session.authMode === 'google' ? (
                         <button
@@ -97,6 +99,8 @@ function renderRoute(route: ReturnType<typeof useRoute>): React.JSX.Element {
             return <CreateMemory />;
         case 'upload':
             return <UploadSessions />;
+        case 'history':
+            return <IngestHistory />;
         case 'status':
             return <Status />;
         case 'list':

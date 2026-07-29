@@ -185,10 +185,65 @@ the expensive way to find out. Zip members are read against their *declared*
 uncompressed size (bomb guard), flattened to leaf names, and nested archives are
 skipped rather than recursed.
 
+## Ingest history
+
+`GET /api/ingest/history` — the History page. What chat history this pool holds,
+per agent and per repo.
+
+**It is derived from the pool, not from a ledger, because no host-side ledger
+exists.** `gemdex sync-history` keeps its ledger (`~/.gemdex/ingest.json`, keyed
+by absolute path + mtime) on each *laptop*; the host only ever received finished
+records. Web upload returns a per-request summary that the browser shows and
+discards. So the memories are the only durable record of what was ingested —
+which is also the record that cannot drift, needs no new schema, and describes
+both paths identically because both write the same kind of memory.
+
+The deterministic `chat:<source>:<sessionId>` id makes this exact: filtering on
+that prefix yields precisely the ingested sessions, and the `<source>` segment is
+what the ingester wrote rather than something guessed here. Repo and branch come
+from the digest's own header line (`Source: … · Repo: … · <date>`), which is the
+memory's first line and so survives into the 100-char `preview` — the whole page
+costs **one** `GET /v1/memories`, with no per-session fetch.
+
+> **The timestamps are session activity, not ingest time.** A digest keeps the
+> transcript's own first/last activity timestamps (`createdAt: meta.firstTs`, and
+> `importRecords` preserves them). The host genuinely cannot know when a laptop
+> ran sync, so the UI says "active 3d ago" and never "ingested 3d ago". The
+> response ships that caveat in `timestampMeaning` so the numbers can't be
+> rendered without it.
+
+## Hygiene status
+
+`GET /api/hygiene/status` — reports that hygiene **cannot run against this
+deployment**, and where it can. There is no scan button, on purpose.
+
+Hygiene's phase 1 clusters near-duplicates from per-memory vectors via
+`MemoryStore.listParentsWithVectors()` — a method on the **local LanceDB** store.
+It is not on the `MemoryBackend` interface, `PostgresMemoryBackend` has no
+equivalent, and `/v1` exposes no vector-listing route. The `gemdex serve` sidecar
+that *does* expose hygiene routes rejects anything but local mode outright. So
+host-side hygiene needs a new `/v1` route plus a pgvector clustering
+implementation — new infrastructure, and its own decision.
+
+Rather than a control that always fails, the endpoint reports what actually
+protects the pool today:
+
+- **Save-time similar-memory detection** (`GEMDEX_SIMILAR_THRESHOLD`, default
+  `0.90` — the same cosine scale hygiene clusters on). Duplicate *prevention*,
+  running automatically on every save.
+- **Ingested sessions cannot duplicate at all**, thanks to the deterministic id.
+  Since chat digests dominate a real pool, most of it is structurally
+  duplicate-free.
+- **Deletion stays a human action** — the same reason no agent tool can delete.
+
+…and the exact command for a real pass (`npx gemdex serve`, or the desktop app),
+with the caveat that a local run inspects *that machine's* `~/.gemdex` pool
+rather than this one.
+
 ## Not in scope here
 
 - **Attachment upload on create/edit.** Create and edit are text-only; the
   file-bearing path is session upload above, where a transcript becomes its own
   digested memory. Existing attachments are readable and downloadable.
-- **Ingest / hygiene status** is GEM2-8. The status page reports BYOI health,
-  version, and capabilities (including `sessionIngest`).
+- **Running hygiene from the browser**, per above — it needs server-side
+  pgvector clustering that does not exist yet.

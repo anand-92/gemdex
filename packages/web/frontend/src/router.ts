@@ -18,6 +18,7 @@ export type Route =
     | { name: 'detail'; id: string }
     | { name: 'create' }
     | { name: 'upload' }
+    | { name: 'history' }
     | { name: 'status' };
 
 export function parseRoute(hash: string): Route {
@@ -29,6 +30,8 @@ export function parseRoute(hash: string): Route {
             return { name: 'create' };
         case 'upload':
             return { name: 'upload' };
+        case 'history':
+            return { name: 'history' };
         case 'status':
             return { name: 'status' };
         case 'memory': {
@@ -59,6 +62,7 @@ export const href = {
     detail: (id: string): string => `#/memory/${encodeURIComponent(id)}`,
     create: (): string => '#/new',
     upload: (): string => '#/upload',
+    history: (): string => '#/history',
     status: (): string => '#/status',
 };
 

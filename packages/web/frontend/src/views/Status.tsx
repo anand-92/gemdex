@@ -11,9 +11,10 @@ import { href } from '../router';
  * an operator can confirm from the app itself that (for example) `dev` mode is
  * not live in a deployment that should require login.
  *
- * **Extension point for GEM2-8:** ingest and hygiene status belong here. The
- * backend already reports `sessionIngest` in its capabilities, so this page
- * shows whether uploads are supported by the connected server.
+ * Ingest and hygiene status live on the History page instead of here: both are
+ * about the *contents* of the pool, and this page is about whether the pieces
+ * are wired up. What does belong here is the capability check below — whether
+ * the connected server is new enough to accept uploads at all.
  */
 export function Status(): React.JSX.Element {
     const [status, setStatus] = useState<StatusInfo | null>(null);
@@ -79,6 +80,26 @@ export function Status(): React.JSX.Element {
 
                         <dt>Capabilities</dt>
                         <dd>{formatCapabilities(byoi.capabilities)}</dd>
+
+                        <dt>Session upload</dt>
+                        {/* Called out separately from the capability list
+                            because it is the one capability with a user-visible
+                            page behind it: an older server has no
+                            /v1/sessions/ingest, and the upload form would fail
+                            at submit time with no explanation. */}
+                        <dd className={supportsSessionIngest(byoi.capabilities) ? 'ok' : 'warn'}>
+                            {supportsSessionIngest(byoi.capabilities)
+                                ? 'Supported — transcripts are digested server-side'
+                                : 'Not supported by this server version — upgrade to use the upload page'}
+                        </dd>
+
+                        <dt>Digest model key</dt>
+                        {/* Operators reliably look for this in the wrong place:
+                            digesting happens inside the server container, so the
+                            key belongs to it, not to this web app. */}
+                        <dd>
+                            <code>GEMINI_API_KEY</code> on the memory backend, not on this web app
+                        </dd>
                     </>
                 )}
             </dl>
@@ -108,6 +129,10 @@ export function Status(): React.JSX.Element {
             </p>
         </section>
     );
+}
+
+function supportsSessionIngest(capabilities: Record<string, unknown> | null | undefined): boolean {
+    return capabilities?.sessionIngest === true;
 }
 
 function formatCapabilities(capabilities: Record<string, unknown> | null | undefined): string {

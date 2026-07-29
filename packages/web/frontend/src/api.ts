@@ -79,6 +79,69 @@ export interface SessionUploadSummary {
     failed: number;
 }
 
+/**
+ * One ingested chat session.
+ *
+ * `startedAt`/`lastActiveAt` are the **session's own** activity times, not when
+ * it was ingested — a digest keeps the transcript's original timestamps. The
+ * BFF sends `timestampMeaning` alongside so the UI can say this out loud.
+ */
+export interface IngestedSession {
+    memoryId: string;
+    source: string;
+    sourceLabel: string;
+    sessionId: string;
+    title: string | null;
+    repo: string | null;
+    branch: string | null;
+    startedAt: number | null;
+    lastActiveAt: number | null;
+    hasTranscript: boolean;
+}
+
+export interface IngestSourceSummary {
+    source: string;
+    label: string;
+    sessions: number;
+    lastActiveAt: number | null;
+}
+
+export interface IngestRepoSummary {
+    repo: string;
+    sessions: number;
+}
+
+export interface IngestHistoryPage {
+    sessions: IngestedSession[];
+    /** Ingested sessions in the pool. */
+    total: number;
+    /** Every memory, so the UI can say "1278 of 1289 memories came from chats". */
+    poolTotal: number;
+    offset: number;
+    limit: number;
+    sources: IngestSourceSummary[];
+    repos: IngestRepoSummary[];
+    /** Rendered verbatim — the caveat belongs with the numbers. */
+    timestampMeaning: string;
+}
+
+export interface HygieneProtection {
+    title: string;
+    detail: string;
+    state: string;
+}
+
+export interface HygieneStatus {
+    available: boolean;
+    reason: string;
+    protections: HygieneProtection[];
+    howToRun: {
+        summary: string;
+        options: { label: string; detail: string; command?: string }[];
+        caveat: string;
+    };
+}
+
 export interface StatusInfo {
     byoi: {
         url: string;
@@ -226,6 +289,16 @@ export const api = {
         for (const file of files) form.append('files', file, file.name);
         return request<SessionUploadSummary>('/api/sessions/upload', { method: 'POST', body: form });
     },
+
+    ingestHistory: (params: { offset?: number; limit?: number } = {}): Promise<IngestHistoryPage> => {
+        const search = new URLSearchParams();
+        if (params.offset !== undefined) search.set('offset', String(params.offset));
+        if (params.limit !== undefined) search.set('limit', String(params.limit));
+        const query = search.toString();
+        return request<IngestHistoryPage>(`/api/ingest/history${query ? `?${query}` : ''}`);
+    },
+
+    hygieneStatus: (): Promise<HygieneStatus> => request<HygieneStatus>('/api/hygiene/status'),
 
     status: (): Promise<StatusInfo> => request<StatusInfo>('/api/status'),
 

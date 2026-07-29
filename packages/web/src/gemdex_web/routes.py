@@ -22,6 +22,8 @@ from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Reques
 from .auth import Identity, require_identity
 from .byoi import ByoiClient, ByoiError
 from .config import Config
+from .hygiene import hygiene_status_payload
+from .ingest_history import IngestedSession, collect_sessions, summarize_repos, summarize_sources
 from .uploads import RejectedUpload, UploadError, collect_uploads
 
 router = APIRouter(prefix="/api", dependencies=[Depends(require_identity)])
@@ -37,6 +39,10 @@ RECALL_MAX_LIMIT = 50
 RECALL_DEFAULT_LIMIT = 10
 
 MAX_QUERY_CHARS = 500
+
+#: Repos listed in the ingest-history summary. Enough to recognize where the
+#: work came from without turning a summary into a second full list.
+TOP_REPOS = 8
 
 #: Mirrors the BYOI's own inline-vs-download rule. Anything outside this set is
 #: served as an attachment download with `nosniff`, so a stored `text/html`
@@ -359,6 +365,70 @@ async def upload_sessions(
     }
 
 
+@router.get("/ingest/history")
+async def ingest_history(
+    request: Request,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = DEFAULT_PAGE_SIZE,
+) -> dict[str, Any]:
+    """What chat history this pool has ingested, and from where.
+
+    **Derived from the pool, not from a ledger** — see `ingest_history.py` for
+    the full reasoning. In short: path A's ledger lives on each laptop and path
+    B keeps no server-side log, so the memories themselves are the only durable
+    host-side record. They also cannot drift from reality, and they describe
+    both paths identically because both write the same kind of memory.
+
+    Costs one `GET /v1/memories`, the same call the list view makes: the digest
+    header is the memory's first line, so it survives into the 100-char preview
+    and no per-session fetch is needed.
+    """
+    try:
+        memories = await _client(request).list()
+    except ByoiError as error:
+        raise _byoi_http_error(error) from error
+
+    sessions = collect_sessions(memories)
+    page = sessions[offset : offset + limit]
+
+    return {
+        "sessions": [_ingested_session(session) for session in page],
+        "total": len(sessions),
+        "poolTotal": len(memories),
+        "offset": offset,
+        "limit": limit,
+        "sources": summarize_sources(sessions),
+        "repos": summarize_repos(sessions, TOP_REPOS),
+        # Stated explicitly rather than left for the UI to assume: these
+        # timestamps are session activity, and the host cannot know when a
+        # laptop ran sync-history. The SPA renders this verbatim.
+        "timestampMeaning": (
+            "Times are when the coding session itself happened, not when it was ingested. "
+            "A session digested from a laptop keeps its original timestamps, so this is the "
+            "session's own history rather than a log of sync runs."
+        ),
+    }
+
+
+@router.get("/hygiene/status")
+async def hygiene_status(request: Request) -> dict[str, Any]:
+    """Whether memory hygiene can run against this deployment, and how to run it.
+
+    Answer today: **not host-side**, and this endpoint says so plainly instead
+    of offering a button that cannot work. See `hygiene.py` for why (the short
+    version: hygiene clustering reads row vectors through
+    `MemoryStore.listParentsWithVectors()`, which exists only on the local
+    LanceDB store — `PostgresMemoryBackend` has no equivalent, and the sidecar
+    that does expose hygiene routes refuses anything but local mode).
+
+    It still reports the two things a human needs: the save-time duplicate
+    detection that *is* already protecting this pool automatically, and the
+    exact command to run a real hygiene pass on a machine that can.
+    """
+    config = _config(request)
+    return hygiene_status_payload(byoi_url=config.byoi_url)
+
+
 @router.get("/status")
 async def status(request: Request) -> dict[str, Any]:
     """Connection/status page data: BYOI reachability, versions, and how this app is configured.
@@ -429,6 +499,26 @@ def _detail(memory: dict[str, Any]) -> dict[str, Any]:
         "createdAt": memory.get("createdAt"),
         "updatedAt": memory.get("updatedAt"),
         "attachments": [_attachment(a) for a in (memory.get("attachments") or [])],
+    }
+
+
+def _ingested_session(session: IngestedSession) -> dict[str, Any]:
+    """Project an ingest-history row for the wire.
+
+    `startedAt`/`lastActiveAt` are named for session activity on purpose — they
+    are not ingest times, and the response's `timestampMeaning` says so.
+    """
+    return {
+        "memoryId": session.memory_id,
+        "source": session.source,
+        "sourceLabel": session.source_label,
+        "sessionId": session.session_id,
+        "title": session.title,
+        "repo": session.repo,
+        "branch": session.branch,
+        "startedAt": session.started_at,
+        "lastActiveAt": session.last_active_at,
+        "hasTranscript": session.has_transcript,
     }
 
 
