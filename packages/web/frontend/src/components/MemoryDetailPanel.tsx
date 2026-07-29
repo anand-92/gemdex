@@ -16,6 +16,7 @@ import { api } from '../api';
 import type { Memory } from '../data/memories';
 import { memoryTitle } from '../data/memories';
 import { GemdexMark } from './GemdexMark';
+import { MarkdownViewer } from './MarkdownViewer';
 import { SourceBadge } from './SourceBadge';
 import { formatBytes, formatCount, fullDate, relativeTime } from '../lib/format';
 
@@ -77,6 +78,7 @@ export function MemoryDetailPanel({
   const [draftContent, setDraftContent] = useState('');
   const [saving, setSaving] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [renderMarkdown, setRenderMarkdown] = useState(true);
 
   useEffect(() => {
     setEditing(false);
@@ -257,13 +259,43 @@ export function MemoryDetailPanel({
           <div className="surface flex min-h-0 flex-1 flex-col overflow-hidden rounded-card border border-edge shadow-card">
             <div className="flex h-9 shrink-0 items-center justify-between border-b border-edge px-4">
               <SectionLabel>Content</SectionLabel>
-              <span className="tabular font-mono text-[9.5px] uppercase leading-none tracking-[0.14em] text-ink-faint">
-                {formatCount(memory.content.length)} chars · embedded
-              </span>
+              <div className="flex items-center gap-3">
+                <div className="flex h-6 items-center rounded-pill border border-edge bg-black/40 p-[2px]">
+                  <button
+                    type="button"
+                    onClick={() => setRenderMarkdown(true)}
+                    className={`rounded-pill px-2.5 py-[2px] text-[10px] font-mono uppercase transition-colors ${
+                      renderMarkdown
+                        ? 'bg-accent text-canvas font-semibold shadow-glow-sm'
+                        : 'text-ink-faint hover:text-ink'
+                    }`}
+                  >
+                    Markdown
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRenderMarkdown(false)}
+                    className={`rounded-pill px-2.5 py-[2px] text-[10px] font-mono uppercase transition-colors ${
+                      !renderMarkdown
+                        ? 'bg-accent text-canvas font-semibold shadow-glow-sm'
+                        : 'text-ink-faint hover:text-ink'
+                    }`}
+                  >
+                    Raw
+                  </button>
+                </div>
+                <span className="tabular font-mono text-[9.5px] uppercase leading-none tracking-[0.14em] text-ink-faint">
+                  {formatCount(memory.content.length)} chars · embedded
+                </span>
+              </div>
             </div>
-            <pre className="min-h-0 flex-1 overflow-y-auto px-4 py-3.5 font-mono text-[12px] leading-[1.75] text-ink-dim whitespace-pre-wrap">
-              {memory.content}
-            </pre>
+            {renderMarkdown ? (
+              <MarkdownViewer content={memory.content} />
+            ) : (
+              <pre className="min-h-0 flex-1 overflow-y-auto px-4 py-3.5 font-mono text-[12px] leading-[1.75] text-ink-dim whitespace-pre-wrap">
+                {memory.content}
+              </pre>
+            )}
           </div>
         )}
 
