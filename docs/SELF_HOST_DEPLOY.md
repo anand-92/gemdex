@@ -73,6 +73,37 @@ can exist on one host without colliding. That also means **different volumes**:
 migrating from a BYOI-only deployment is a data move, not a config switch — see
 [Migrating an existing BYOI stack](#migrating-an-existing-byoi-stack).
 
+## Just want it on your LAN? Start with the installer
+
+This guide is the **public-internet** deployment: a domain, TLS, Google OAuth.
+If all you want is Gemdex reachable from your own machines, one command does it:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/anand-92/gemdex/main/scripts/install.sh | bash -s -- --lan
+```
+
+[`scripts/install.sh`](../scripts/install.sh) checks Docker, generates every
+secret into a `0600` `.env`, builds and starts the stack, waits for migrations,
+**verifies a real save and recall**, and prints a ready-to-paste MCP client
+config plus your LAN IP. Re-running is the upgrade path: secrets are never
+regenerated and no volume is removed.
+
+What it deliberately does *not* do, and why this guide still exists:
+
+| | Installer (`--lan`) | This guide |
+|---|---|---|
+| MCP auth | `static` — one shared bearer | `google` — OAuth 2.1, per-caller identity |
+| Web auth | `dev` — **no login at all** | Google login, single-account allowlist |
+| Transport | plaintext HTTP | HTTPS at an edge, with rate limiting |
+| Reachable from | your local network | anywhere |
+
+The installer's defaults are right for a trusted home network and wrong for the
+public internet — a shared bearer over plaintext and a login-free UI that can
+delete memories. Everything below upgrades an installed stack in place: the
+`.env` it wrote is the same `.env` this guide edits, so switch
+`GEMDEX_MCP_AUTH`/`GEMDEX_WEB_AUTH` to `google`, fill in the OAuth values, put an
+edge in front, and re-run `docker compose up -d`.
+
 ## Prerequisites
 
 - Docker Engine + Compose v2. On macOS, [colima](https://github.com/abiosoft/colima)

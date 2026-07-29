@@ -153,3 +153,110 @@ jobs:
         if: always()
         working-directory: packages/server
         run: docker compose --env-file .env.example down --volumes
+
+  bootstrap:
+    name: Self-host installer smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Shellcheck the installer
+        run: shellcheck scripts/install.sh
+
+      # A GitHub runner has no Gemini key, so --skip-verify drops the save/recall
+      # round trip. Everything up to it is still exercised: dependency checks,
+      # secret generation, the compose build, migrations, and all three health
+      # endpoints. The placeholder key is only there to get past the installer's
+      # (correct) refusal to start a stack that cannot embed.
+      - name: Run the installer
+        env:
+          GEMINI_API_KEY: ci-placeholder-no-embedding-in-ci
+        run: |
+          bash scripts/install.sh --yes --skip-verify \
+            --project gemdex-ci \
+            --byoi-port 18765 --mcp-port 18766 --web-port 18767
+
+      # Re-running is the documented upgrade path, and the property that makes it
+      # safe is that secrets are never regenerated. A regression here would be
+      # near-invisible in manual testing but would rotate POSTGRES_PASSWORD and
+      # lock users out of their own volume, so it is worth pinning in CI.
+      - name: Re-run must be idempotent
+        run: |
+          cp deploy/.env /tmp/env.before
+          bash scripts/install.sh --yes --skip-verify \
+            --project gemdex-ci \
+            --byoi-port 18765 --mcp-port 18766 --web-port 18767
+          if ! diff -q /tmp/env.before deploy/.env; then
+            echo "::error::the installer changed .env on re-run; secrets must be preserved"
+            diff /tmp/env.before deploy/.env || true
+            exit 1
+          fi
+          perms="$(stat -c '%a' deploy/.env)"
+          if [ "$perms" != "600" ]; then
+            echo "::error::deploy/.env is $perms, expected 600"
+            exit 1
+          fi
+          echo "secrets preserved and .env is 0600"
+
+      # The MCP endpoint is the whole point of the install, so check it is
+      # actually usable with the bearer the installer generated — and that it
+      # refuses a caller without one.
+      - name: MCP endpoint requires the generated bearer
+        run: |
+          token="$(sed -n 's/^GEMDEX_MCP_HTTP_TOKEN=//p' deploy/.env | tail -n 1)"
+          code="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            http://127.0.0.1:18766/mcp -H 'Content-Type: application/json' -d '{}')"
+          if [ "$code" != "401" ]; then
+            echo "::error::unauthenticated /mcp returned $code, expected 401"
+            exit 1
+          fi
+          curl -fsS -X POST http://127.0.0.1:18766/mcp \
+            -H "Authorization: Bearer $token" \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            | grep -q '"serverInfo"'
+          echo "MCP endpoint rejects anonymous callers and accepts the generated bearer"
+
+      # The reason gemdex-server keeps a loopback-only publish even in LAN mode:
+      # its bearer has full memory access, no identity and no expiry. Assert the
+      # override cannot accidentally widen it.
+      - name: LAN mode exposes MCP and web but never the memory API
+        run: |
+          bash scripts/install.sh --yes --skip-verify --lan \
+            --project gemdex-ci \
+            --byoi-port 18765 --mcp-port 18766 --web-port 18767
+          cd deploy
+          docker compose -p gemdex-ci --env-file .env \
+            -f docker-compose.yml -f docker-compose.lan.yml config \
+            | python3 -c '
+          import sys, yaml
+          services = yaml.safe_load(sys.stdin)["services"]
+          expected = {
+              "gemdex-server": "127.0.0.1",
+              "gemdex-mcp-http": "0.0.0.0",
+              "gemdex-web": "0.0.0.0",
+          }
+          for name, want in expected.items():
+              ips = [p.get("host_ip") for p in services[name].get("ports", [])]
+              # Exactly one binding: compose MERGES list keys across files, so a
+              # missing `!override` silently yields both 127.0.0.1 and 0.0.0.0
+              # on the same port, which fails to bind at runtime.
+              if ips != [want]:
+                  raise SystemExit(f"::error::{name} publishes {ips}, expected [{want!r}]")
+          print("port bindings are correct in LAN mode")
+          '
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          cd deploy
+          docker compose -p gemdex-ci --env-file .env ps || true
+          docker compose -p gemdex-ci --env-file .env logs --tail 50 || true
+
+      - name: Tear down
+        if: always()
+        run: |
+          cd deploy
+          docker compose -p gemdex-ci --env-file .env down --volumes --remove-orphans || true

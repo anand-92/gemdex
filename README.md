@@ -311,7 +311,35 @@ Run Gemdex Server with Postgres/pgvector and file or S3-compatible attachment
 storage, then connect MCP, CLI, and desktop clients to the same global memory
 pool. Embedding runs on the server, so remote clients do not need a Gemini key.
 
-It's two commands. On the server host:
+### One command (the whole stack)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/anand-92/gemdex/main/scripts/install.sh | bash
+```
+
+Brings up Postgres, the memory API, the [Streamable HTTP MCP
+endpoint](packages/mcp-http/README.md) and the [web manager](packages/web/README.md);
+generates every secret; waits for migrations; **verifies a real save and recall**;
+then prints a ready-to-paste MCP client config. It asks for one thing — a free
+[Google AI Studio key](https://aistudio.google.com/apikey) — or reads
+`GEMINI_API_KEY` from the environment.
+
+Loopback-only by default. Add `--lan` to reach it from your other devices:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/anand-92/gemdex/main/scripts/install.sh | bash -s -- --lan
+```
+
+Re-running is safe and is the upgrade path: existing secrets are never
+regenerated and no volume is removed. `--help` lists the flags (alternate ports,
+install directory, pinned ref). For a public domain with TLS and Google login
+instead of the shared bearer, see the
+[self-host deploy guide](docs/SELF_HOST_DEPLOY.md).
+
+### Or just the memory server
+
+If you only want the BYOI backend — no MCP endpoint, no web manager — it's two
+commands. On the server host:
 
 ```bash
 git clone https://github.com/anand-92/gemdex.git

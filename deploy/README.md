@@ -4,9 +4,24 @@ The full **remote-agent** stack: BYOI memory API, the Streamable HTTP MCP
 endpoint, and the browser manager UI — with only the MCP endpoint and the UI
 exposed publicly over HTTPS.
 
-**Start here: [`docs/SELF_HOST_DEPLOY.md`](../docs/SELF_HOST_DEPLOY.md)** — the
-step-by-step guide (Google OAuth, Cloudflare Tunnel / Caddy, rate limiting, and
-the checks that prove Postgres and the BYOI bearer aren't public).
+**Just want it running?** [`scripts/install.sh`](../scripts/install.sh) automates
+everything below — secrets, build, health, and a printed MCP client config:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/anand-92/gemdex/main/scripts/install.sh | bash
+# add --lan to reach it from other devices on your network
+```
+
+It defaults to `static` MCP auth and `dev` web auth, which is the right shape for
+a LAN box and the wrong shape for the public internet — the guide below is the
+upgrade to Google OAuth behind a TLS edge.
+
+**For a public deployment start here:
+[`docs/SELF_HOST_DEPLOY.md`](../docs/SELF_HOST_DEPLOY.md)** — the step-by-step
+guide (Google OAuth, Cloudflare Tunnel / Caddy, rate limiting, and the checks
+that prove Postgres and the BYOI bearer aren't public).
+
+By hand:
 
 ```sh
 cd deploy
@@ -21,6 +36,7 @@ docker compose up -d --build
 | `docker-compose.yml` | The stack: `postgres`, `gemdex-server` (loopback-only), `gemdex-mcp-http` (the agent surface), `gemdex-web` (the human surface). |
 | `.env.example` | Every variable, with what it's for and how to generate it. |
 | `scripts/ensure-up.sh` | Idempotent bring-up: waits for Docker (starts colima if needed), `up -d`, waits for health. Used by both boot units. |
+| `docker-compose.lan.yml` | **Generated** by `install.sh --lan` (gitignored). Republishes MCP + web on `0.0.0.0`, never `gemdex-server`. Uses `ports: !override` because compose *merges* list keys — without it each service binds both `127.0.0.1` and `0.0.0.0` on one port and fails to start. |
 | `launchd/com.gemdex.deploy.plist` | macOS always-on (Mac Mini). Runs at **login** — see the caveat in the guide. |
 | `systemd/gemdex-deploy.service` | Linux always-on (VPS). Runs at boot. |
 
