@@ -30,6 +30,36 @@ logger = get_logger(__name__)
 STATIC_CLIENT_ID = "gemdex-mcp-http-static"
 
 
+def _is_email_verified(token: AccessToken) -> bool:
+    """Whether Google asserts the token's email is verified.
+
+    The claim arrives in **two different shapes** and both must be accepted, or
+    auth fails closed for a perfectly valid account:
+
+    - Google's `tokeninfo` endpoint returns the JSON **string** `"true"`.
+    - The v2 `userinfo` endpoint returns a real **boolean** `True` (as
+      `verified_email`).
+
+    `GoogleTokenVerifier` builds the claim as
+    `token_data.get("email_verified") or user_data.get("verified_email")`, so
+    whenever `tokeninfo` answers, its truthy `"true"` short-circuits the `or` and
+    the boolean from `userinfo` is never reached. A strict `is True` check
+    therefore rejects every real Google login.
+
+    Anything that is not an affirmative is treated as unverified: `False`,
+    `"false"`, `None`, a missing claim, or an unexpected type. An unverified
+    email is self-asserted and could name someone else's account, so this must
+    stay deny-by-default rather than coercing with `bool()` — `bool("false")` is
+    `True`.
+    """
+    value = (token.claims or {}).get("email_verified")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() == "true"
+    return False
+
+
 def _email_of(token: AccessToken) -> str | None:
     """The verified Google email on an access token, or `None` if absent.
 
@@ -60,7 +90,8 @@ class SingleUserGoogleProvider(GoogleProvider):
 
     Requiring `email_verified` matters: an unverified Google email is
     self-asserted and could be *anyone's* address, so treating it as identity
-    would let an attacker claim the allowlisted account.
+    would let an attacker claim the allowlisted account. See `_is_email_verified`
+    for why that claim cannot be compared with `is True`.
     """
 
     def __init__(self, *, allowed_email: str, **kwargs: object) -> None:
@@ -80,7 +111,7 @@ class SingleUserGoogleProvider(GoogleProvider):
             )
             return None
 
-        if (access_token.claims or {}).get("email_verified") is not True:
+        if not _is_email_verified(access_token):
             logger.warning(
                 "Rejected Google identity %s: email is not verified by Google.", email
             )

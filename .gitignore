@@ -11,6 +11,7 @@ dist/
 # a committed part of the reference stack — the safe loopback default stays
 # readable in docker-compose.yml.
 deploy/docker-compose.lan.yml
+deploy/docker-compose.override.yml
 .pnpm-store/
 coverage/
 .vscode/

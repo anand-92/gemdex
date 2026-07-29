@@ -30,7 +30,16 @@ MCP_HEADERS = {"Accept": "application/json, text/event-stream"}
 
 
 def google_access_token(
-    *, email: str | None = ALLOWED_EMAIL, email_verified: bool = True, **claims: Any
+    *,
+    email: str | None = ALLOWED_EMAIL,
+    # A STRING, matching what Google's `tokeninfo` endpoint actually returns —
+    # not the boolean it would be tempting to assume. `GoogleTokenVerifier`
+    # passes the claim through verbatim, and `tokeninfo`'s truthy `"true"`
+    # short-circuits the `or` that would otherwise reach `userinfo`'s real
+    # boolean. Defaulting to a bool here is what let a strict `is True` check
+    # ship and reject every real login.
+    email_verified: object = "true",
+    **claims: Any,
 ) -> AccessToken:
     """The `AccessToken` `GoogleTokenVerifier` builds after a successful verify."""
     return AccessToken(
@@ -129,9 +138,39 @@ async def test_email_match_is_case_insensitive(monkeypatch: pytest.MonkeyPatch) 
     assert await provider().verify_token("fastmcp-jwt") is not None
 
 
-async def test_unverified_email_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An unverified Google email is self-asserted — it could be anyone's."""
-    stub_upstream(monkeypatch, google_access_token(email_verified=False))
+@pytest.mark.parametrize("verified", ["true", "True", " true ", True])
+async def test_verified_email_is_accepted_in_either_shape(
+    monkeypatch: pytest.MonkeyPatch, verified: object
+) -> None:
+    """Google sends `email_verified` as a string from `tokeninfo`, a bool from `userinfo`.
+
+    Both are affirmative and both must be admitted. Comparing with `is True`
+    accepts only the bool and locks the allowlisted user out entirely.
+    """
+    stub_upstream(monkeypatch, google_access_token(email_verified=verified))
+    assert await provider().verify_token("fastmcp-jwt") is not None
+
+
+@pytest.mark.parametrize("unverified", [False, "false", "False", None, "", 1, "yes"])
+async def test_unverified_email_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, unverified: object
+) -> None:
+    """An unverified Google email is self-asserted — it could be anyone's.
+
+    Anything that is not an explicit affirmative is rejected, including values a
+    naive `bool()` coercion would wave through (`"false"` is a non-empty string,
+    so `bool("false")` is `True`).
+    """
+    stub_upstream(monkeypatch, google_access_token(email_verified=unverified))
+    assert await provider().verify_token("fastmcp-jwt") is None
+
+
+async def test_missing_email_verified_claim_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = google_access_token()
+    del token.claims["email_verified"]
+    stub_upstream(monkeypatch, token)
     assert await provider().verify_token("fastmcp-jwt") is None
 
 
