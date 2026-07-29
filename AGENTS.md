@@ -65,9 +65,13 @@ Two facts that explain most of the codebase:
 | `packages/core` | `gemdex-core` | The engine: chunking + parent-document recall, embeddings, LanceDB hybrid+RRF, the shared HTTP router, the backend interface. | [core/AGENTS.md](packages/core/AGENTS.md) |
 | `packages/mcp` | `gemdex-mcp` | One binary, three modes: MCP stdio tools, the `gemdex serve` localhost sidecar, the remote-mode CLI. | [mcp/AGENTS.md](packages/mcp/AGENTS.md) |
 | `packages/server` | `gemdex-server` | Self-hosted BYOI backend: thin `node:http` shell (`/v1`, auth, CORS, migrations) over Postgres/pgvector + file/S3 blobs, server-side embedding. | [server/AGENTS.md](packages/server/AGENTS.md) |
+| `packages/mcp-http` | `gemdex-mcp-http` | **Python.** The Streamable HTTP MCP surface (FastMCP v4) at `/mcp` for remote agents; OAuth 2.1 single-user auth. Thin wrapper over the BYOI `/v1` API — cannot import core. | [mcp-http/AGENTS.md](packages/mcp-http/AGENTS.md) |
 | `packages/app` | — | Native SwiftUI macOS manage-only app; spawns the sidecar and is a thin HTTP client. Swift, not TS. | [app/AGENTS.md](packages/app/AGENTS.md) |
 
-`docs/` holds the BYOI operations guide and the remote-mode wire contract.
+`docs/` holds the BYOI operations guide, the remote-mode wire contract, and the
+[self-host deploy guide](docs/SELF_HOST_DEPLOY.md). `deploy/` is the reference
+Compose stack for the full remote-agent setup (BYOI + MCP behind a public HTTPS
+edge) — see [deploy/README.md](deploy/README.md).
 
 ## Cross-cutting mechanics (where to look)
 

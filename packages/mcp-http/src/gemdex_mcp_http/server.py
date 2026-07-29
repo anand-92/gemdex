@@ -12,6 +12,8 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 from fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse
 
 from .auth import build_auth_provider
 from .byoi import ByoiClient
@@ -79,6 +81,21 @@ def build_server(config: Config, client: ByoiClient | None = None) -> FastMCP:
 
     for name, description in _TOOL_DESCRIPTIONS.items():
         mcp.tool(getattr(tools, name), name=name, description=description.strip())
+
+    @mcp.custom_route("/healthz", methods=["GET"])
+    async def healthz(_request: Request) -> PlainTextResponse:
+        """Liveness probe for the container healthcheck and the edge.
+
+        Deliberately unauthenticated — FastMCP exempts custom routes from auth
+        middleware by design, which is what makes this usable as a Docker
+        healthcheck in `google` mode where every `/mcp` call is a 401.
+
+        Liveness only: it says this process is serving, not that the BYOI is
+        reachable. Probing BYOI from here would make an unauthenticated endpoint
+        a backend availability oracle, and would take the MCP container down for
+        a failure that belongs to a different service's healthcheck.
+        """
+        return PlainTextResponse("ok")
 
     return mcp
 

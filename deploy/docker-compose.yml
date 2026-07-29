@@ -1,0 +1,227 @@
+# Gemdex reference deploy — the full remote-agent stack.
+#
+# Four services (one still commented out):
+#
+#   postgres         the memory store (pgvector). No host port at all.
+#   gemdex-server    the BYOI /v1 API. Published on 127.0.0.1 ONLY.
+#   gemdex-mcp-http  the Streamable HTTP MCP endpoint. The ONLY thing the
+#                    public edge fronts.
+#   gemdex-web       the manager UI — lands in GEM2-5, stub below.
+#
+# The security shape, which the whole file exists to enforce: nothing reaches
+# Postgres or the BYOI bearer from the internet. Only /mcp is exposed, and the
+# edge (Cloudflare Tunnel or Caddy) connects to mcp-http over loopback.
+#
+#   internet ──TLS──▶ edge ──▶ 127.0.0.1:8766 (mcp-http) ──▶ gemdex-server ──▶ postgres
+#                                                             (compose network only)
+#
+# This is a SEPARATE project name from packages/server/docker-compose.yml
+# ("gemdex"), so a BYOI-only stack and this full stack can coexist on one host
+# without fighting over container names or volumes. It does mean the two use
+# different volumes: see docs/SELF_HOST_DEPLOY.md before migrating an existing
+# BYOI-only deployment.
+name: gemdex-deploy
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.2-pg16-bookworm
+    restart: unless-stopped
+    # Deliberately NO `ports:`. Reachable only from the compose network, so
+    # Postgres is unreachable from the host, let alone the internet.
+    environment:
+      POSTGRES_DB: gemdex
+      POSTGRES_USER: gemdex
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - gemdex-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gemdex -d gemdex"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    security_opt:
+      - no-new-privileges:true
+
+  gemdex-server:
+    image: gemdex-server:local
+    build:
+      context: ..
+      dockerfile: packages/server/Dockerfile
+    restart: unless-stopped
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # 127.0.0.1 is the security boundary, not a preference. The BYOI bearer is
+    # a single long-lived secret with full memory access and no per-user
+    # identity, so it must never be publicly routable. mcp-http reaches it over
+    # the compose network instead (see GEMDEX_SERVER_URL below); this publish
+    # exists only for host-side debugging and the desktop app.
+    ports:
+      - "127.0.0.1:${GEMDEX_SERVER_PORT:-8765}:8765"
+    environment:
+      GEMDEX_SERVER_HOST: 0.0.0.0
+      GEMDEX_SERVER_PORT: 8765
+      GEMDEX_SERVER_TOKEN: ${GEMDEX_SERVER_TOKEN:?Set GEMDEX_SERVER_TOKEN in .env}
+      GEMDEX_SERVER_DATABASE_URL: postgres://gemdex:${POSTGRES_PASSWORD}@postgres:5432/gemdex
+      GEMINI_API_KEY: ${GEMINI_API_KEY:?Set GEMINI_API_KEY in .env}
+      GEMDEX_SERVER_ALLOWED_ORIGINS: ${GEMDEX_SERVER_ALLOWED_ORIGINS:-}
+      GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH: "false"
+      BLOB_STORE: file
+      BLOB_DIR: /var/lib/gemdex/blobs
+
+      # S3-compatible alternative: remove BLOB_STORE/BLOB_DIR above, uncomment
+      # these, and provide the referenced variables in .env.
+      # BLOB_STORE: s3
+      # S3_BUCKET: ${S3_BUCKET}
+      # S3_ENDPOINT: ${S3_ENDPOINT}
+      # S3_REGION: ${S3_REGION:-auto}
+      # S3_PREFIX: ${S3_PREFIX:-}
+      # S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID}
+      # S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY}
+      # S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-false}
+    volumes:
+      - gemdex-blobs:/var/lib/gemdex/blobs
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8765/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 6
+
+  gemdex-mcp-http:
+    image: gemdex-mcp-http:local
+    build:
+      context: ..
+      dockerfile: packages/mcp-http/Dockerfile
+    restart: unless-stopped
+    init: true
+    depends_on:
+      gemdex-server:
+        condition: service_healthy
+    # Also loopback-only on the host. The edge terminates TLS and connects here
+    # over 127.0.0.1, so this port is never itself internet-facing. Publishing
+    # 0.0.0.0 would expose plaintext HTTP directly, bypassing the edge's TLS and
+    # rate limiting.
+    ports:
+      - "127.0.0.1:${GEMDEX_MCP_HTTP_PORT:-8766}:8766"
+    environment:
+      GEMDEX_MCP_HTTP_HOST: 0.0.0.0
+      GEMDEX_MCP_HTTP_PORT: 8766
+
+      # Service DNS on the compose network — NOT 127.0.0.1, which inside this
+      # container would mean the container itself.
+      GEMDEX_SERVER_URL: http://gemdex-server:8765
+      GEMDEX_SERVER_TOKEN: ${GEMDEX_SERVER_TOKEN:?Set GEMDEX_SERVER_TOKEN in .env}
+
+      # Auth. `google` = OAuth 2.1 resource server, single-user allowlist.
+      # `static` = one shared bearer; loopback dev only, do NOT put it behind a
+      # public edge. See packages/mcp-http/README.md.
+      GEMDEX_MCP_AUTH: ${GEMDEX_MCP_AUTH:-google}
+
+      # Required when GEMDEX_MCP_AUTH=google. GEMDEX_MCP_BASE_URL must be the
+      # PUBLIC https URL (it becomes the OAuth issuer and resource identity, and
+      # must match the redirect URI registered with Google) — not the loopback
+      # address this container binds.
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      GEMDEX_MCP_BASE_URL: ${GEMDEX_MCP_BASE_URL:-}
+      GEMDEX_ALLOWED_EMAIL: ${GEMDEX_ALLOWED_EMAIL:-}
+
+      # Only used when GEMDEX_MCP_AUTH=static.
+      GEMDEX_MCP_HTTP_TOKEN: ${GEMDEX_MCP_HTTP_TOKEN:-}
+
+      GEMDEX_TRUST_RANKING: ${GEMDEX_TRUST_RANKING:-false}
+
+      # Where FastMCP keeps OAuthProxy state: dynamic client registrations and
+      # the encrypted upstream Google tokens. It defaults to a platformdirs path
+      # under $HOME, which is /nonexistent for this system user — with
+      # `read_only: true` the process then dies at startup trying to mkdir it.
+      # Pointing it at the persistent volume fixes that AND keeps registrations
+      # across restarts; on tmpfs every restart would force clients to
+      # re-register and re-authorize.
+      FASTMCP_HOME: /var/lib/gemdex/fastmcp
+
+      # The report_outcome ledger. Same reason: it defaults to ~/.gemdex, which
+      # is unwritable here, and it is real state worth keeping — losing it
+      # silently resets every memory's track record.
+      GEMDEX_STATS_PATH: /var/lib/gemdex/stats.json
+    volumes:
+      # Persistent MCP-side state. Two things live here, both of which must
+      # survive a recreate: FASTMCP_HOME above, and the report_outcome ledger.
+      - gemdex-mcp-state:/var/lib/gemdex
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # /healthz, not /mcp: custom routes are auth-exempt in FastMCP, whereas an
+      # unauthenticated /mcp call correctly returns 401 and would mark this
+      # container unhealthy forever in google mode.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8766/healthz',timeout=2).status==200 else 1)"
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 6
+
+  # --- gemdex-web (GEM2-5) — NOT YET IMPLEMENTED -------------------------
+  #
+  # The manager UI lands in GEM2-5; `packages/web` does not exist yet, so this
+  # is a placeholder, not a working service. Uncomment it only once that
+  # package exists — `docker compose up` will fail on the missing build
+  # context otherwise.
+  #
+  # Two open decisions to settle in GEM2-5, both affecting the edge:
+  #   1. Separate container (as sketched) vs static assets served by mcp-http.
+  #      A separate origin means the edge routes by path (/ → web, /mcp → MCP).
+  #   2. It must NOT get the BYOI bearer. The browser is untrusted, so the UI
+  #      should authenticate as the OAuth user and go through mcp-http, rather
+  #      than holding a full-access token.
+  #
+  # gemdex-web:
+  #   image: gemdex-web:local
+  #   build:
+  #     context: ..
+  #     dockerfile: packages/web/Dockerfile
+  #   restart: unless-stopped
+  #   init: true
+  #   depends_on:
+  #     gemdex-mcp-http:
+  #       condition: service_healthy
+  #   # Loopback only, like everything else — the edge fronts it.
+  #   ports:
+  #     - "127.0.0.1:${GEMDEX_WEB_PORT:-8767}:8767"
+  #   environment:
+  #     # Public URL of the MCP endpoint the UI talks to (same origin as the
+  #     # OAuth issuer).
+  #     GEMDEX_MCP_BASE_URL: ${GEMDEX_MCP_BASE_URL:-}
+  #   read_only: true
+  #   tmpfs:
+  #     - /tmp
+  #   security_opt:
+  #     - no-new-privileges:true
+  #   healthcheck:
+  #     test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8767/healthz"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     start_period: 15s
+  #     retries: 6
+
+volumes:
+  gemdex-postgres:
+  gemdex-blobs:
+  gemdex-mcp-state:

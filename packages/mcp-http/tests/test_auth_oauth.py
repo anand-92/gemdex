@@ -244,3 +244,26 @@ def test_tools_are_not_listable_without_auth(http: TestClient) -> None:
         )
     assert response.status_code == 401
     assert "save_memory" not in response.text
+
+
+# --- container healthcheck ----------------------------------------------
+
+
+def test_healthz_is_reachable_without_auth(http: TestClient) -> None:
+    """The Docker healthcheck has no token, so `/healthz` must bypass auth.
+
+    Without this the container would be marked unhealthy forever in google mode,
+    since every `/mcp` request correctly answers 401.
+    """
+    with http as client:
+        response = client.get("/healthz")
+    assert response.status_code == 200
+    assert response.text == "ok"
+
+
+def test_healthz_leaks_nothing(http: TestClient) -> None:
+    """It is public, so it must not confirm the allowlisted identity or config."""
+    with http as client:
+        body = client.get("/healthz").text
+    assert ALLOWED_EMAIL not in body
+    assert "mcp.example.com" not in body

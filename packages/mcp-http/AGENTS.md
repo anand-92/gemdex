@@ -36,7 +36,7 @@ the stats ledger — is **re-implemented here and must be kept in sync by hand**
 | `tools.py` | `GemdexTools` — the six wrappers: validate args → call BYOI → render. Mirrors `handlers.ts`. |
 | `descriptions.py` | Tool descriptions copied from TS `index.ts`, with the attachment-path caveat swapped in. |
 | `auth.py` | `build_auth_provider()` — **the single auth seam.** Static bearer, or `SingleUserGoogleProvider` (OAuth 2.1 + email allowlist). |
-| `server.py` | `build_server()` + `main()`. Registers tools, runs `mcp.run(transport="http", …)`. |
+| `server.py` | `build_server()` + `main()`. Registers tools + `/healthz`, runs `mcp.run(transport="http", …)`. |
 
 ## Three invariants that are easy to break
 
@@ -123,3 +123,19 @@ email comparison or the `email_verified` guard makes them fail.
   run; `uv run pytest` is the offline suite and mocks the BYOI entirely.
 - **This package is outside the pnpm workspace.** `pnpm lint`/`typecheck`/`build`
   do not see it; use `uv run pytest`.
+- **`/healthz` must stay unauthenticated and must not probe the BYOI.** FastMCP
+  exempts custom routes from auth middleware, which is the only reason the
+  container healthcheck works in `google` mode (every `/mcp` call is a 401 by
+  design). Adding a BYOI probe would make a public endpoint report backend
+  availability, and would take this container down for another service's failure.
+- **The container needs a writable state dir; `$HOME` is not one.**
+  `FASTMCP_HOME` (OAuthProxy client registrations + encrypted upstream tokens)
+  and `GEMDEX_STATS_PATH` (the outcome ledger) both default under `$HOME`, which
+  is `/nonexistent` for the image's system user — with `read_only: true` the
+  process dies at startup. `deploy/docker-compose.yml` points both at a named
+  volume, and the Dockerfile pre-creates `/var/lib/gemdex` as uid 10001 so Docker
+  seeds the volume with that ownership rather than root's. Both are real state:
+  on tmpfs, every restart would force clients to re-register and re-authorize.
+- **The image build context is the repo root**, matching `packages/server`:
+  `docker build -f packages/mcp-http/Dockerfile .`. The deploy stack is
+  [`deploy/`](../../deploy/README.md).

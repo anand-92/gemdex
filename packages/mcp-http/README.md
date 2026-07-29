@@ -266,4 +266,33 @@ allowlist itself runs for real.
 | `src/gemdex_mcp_http/tools.py` | The six tool wrappers: arg validation, BYOI delegation, result formatting. Mirrors `handlers.ts`. |
 | `src/gemdex_mcp_http/descriptions.py` | Tool descriptions, copied from the TS `index.ts` so agents see identical guidance. |
 | `src/gemdex_mcp_http/auth.py` | `build_auth_provider()` — the auth seam: static bearer, or the OAuth 2.1 Google provider plus the single-user allowlist. |
-| `src/gemdex_mcp_http/server.py` | `build_server()` + `main()` — registers tools, runs `mcp.run(transport="http", …)`. |
+| `src/gemdex_mcp_http/server.py` | `build_server()` + `main()` — registers tools, the `/healthz` route, runs `mcp.run(transport="http", …)`. |
+| `Dockerfile` | Container image (uv → venv → non-root `python:3.13-slim`). Build context is the **repo root**. |
+
+## Running in a container
+
+```sh
+# From the repo root, not this directory.
+docker build -f packages/mcp-http/Dockerfile -t gemdex-mcp-http:local .
+```
+
+The reference Compose stack that wires this to a BYOI server and a public HTTPS
+edge is [`deploy/`](../../deploy/README.md); the walkthrough is
+[`docs/SELF_HOST_DEPLOY.md`](../../docs/SELF_HOST_DEPLOY.md).
+
+Two things the image needs that aren't obvious:
+
+- **`GET /healthz`** returns `ok` and is the container healthcheck. It is
+  deliberately **unauthenticated** — FastMCP exempts custom routes from auth
+  middleware, which is the only reason a healthcheck can work in `google` mode
+  where every `/mcp` call correctly answers 401. It reports liveness only, not
+  BYOI reachability: probing the backend from a public endpoint would turn it
+  into an availability oracle and would take this container down for another
+  service's failure.
+- **A writable state directory.** `FASTMCP_HOME` (OAuthProxy client
+  registrations + encrypted upstream tokens) and `GEMDEX_STATS_PATH` (the
+  `report_outcome` ledger) both default to paths under `$HOME`, which does not
+  exist for the image's system user — with a read-only root filesystem the
+  process dies at startup. The compose file points both at a named volume, and
+  the image pre-creates `/var/lib/gemdex` owned by uid 10001 so Docker seeds the
+  volume with the right ownership instead of root's.
