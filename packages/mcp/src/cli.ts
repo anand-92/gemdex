@@ -247,22 +247,34 @@ async function migrateLocalToRemote(
     options: { attachTranscripts?: boolean } = {},
 ): Promise<MigrationResult> {
     const exported = await local.exportAll();
-    const prepared = maybeAttachTranscripts(exported, options.attachTranscripts === true, io);
+    const attach = options.attachTranscripts === true;
     const result: MigrationResult = {
         created: 0,
         updated: 0,
         skipped: 0,
-        ...(options.attachTranscripts === true && {
-            transcriptsAttached: prepared.attached,
-            transcriptsMissing: prepared.missing,
-        }),
+        ...(attach && { transcriptsAttached: 0, transcriptsMissing: 0 }),
     };
-    for (const record of prepared.records) {
+    // Attach + import one record at a time so multi-hundred-MB transcript
+    // backfills do not hold every base64 payload in memory at once.
+    let index = 0;
+    for (const raw of exported) {
+        index += 1;
+        let record = raw;
+        if (attach) {
+            const prepared = maybeAttachTranscripts([raw], true, io);
+            record = prepared.records[0] ?? raw;
+            result.transcriptsAttached = (result.transcriptsAttached ?? 0) + prepared.attached;
+            result.transcriptsMissing = (result.transcriptsMissing ?? 0) + prepared.missing;
+        }
         try {
             const existed = await remote.get(record.id) !== null;
             const imported = await remote.importRecords([record]);
             if (imported.imported !== 1) {
                 result.skipped += 1;
+                const detail = imported.errors[0]?.error;
+                if (detail) {
+                    io.stderr(`Skipped ${record.id}: ${detail}\n`);
+                }
             } else if (existed) {
                 result.updated += 1;
             } else {
@@ -271,6 +283,17 @@ async function migrateLocalToRemote(
         } catch (error) {
             result.skipped += 1;
             io.stderr(`Skipped ${record.id}: ${errorMessage(error)}\n`);
+        }
+        if (index % 25 === 0 || index === exported.length) {
+            io.stdout(
+                `Progress ${index}/${exported.length} — ` +
+                `created ${result.created}, updated ${result.updated}, skipped ${result.skipped}` +
+                (attach
+                    ? `, transcripts ${result.transcriptsAttached ?? 0}` +
+                      ` (missing ${result.transcriptsMissing ?? 0})`
+                    : '') +
+                `\n`,
+            );
         }
     }
     return result;
@@ -369,8 +392,14 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
     const store = dependencies.store ?? new ClientConfigStore();
     const io = dependencies.io ?? defaultIo;
     const fetchImpl = dependencies.fetch ?? fetch;
+    // Import/backfill of digests + multi-MB transcript blobs regularly exceeds
+    // the default 30s HTTP timeout; give remote migrations five minutes/request.
     const createRemoteBackend = dependencies.createRemoteBackend ??
-        ((remote: StoredRemote, token: string) => new RemoteMemoryBackend({ url: remote.url, token }));
+        ((remote: StoredRemote, token: string) => new RemoteMemoryBackend({
+            url: remote.url,
+            token,
+            timeoutMs: 300_000,
+        }));
     const createLocalBackend = dependencies.createLocalBackend ?? (() => {
         const localConfig = createConfig((name) => name === 'GEMDEX_MODE' ? 'local' : store.getEnv(name));
         return createMemoryBackend(localConfig);
