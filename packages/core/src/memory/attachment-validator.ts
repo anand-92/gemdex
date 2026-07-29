@@ -28,10 +28,32 @@ const MIME_TO_KIND: Record<string, AttachmentKind> = {
     'video/mp4': 'video',
     'video/quicktime': 'video',
     'application/pdf': 'pdf',
+    // Blob-only (non-embedded) file attachments — transcripts, plain text, JSONL.
+    'text/plain': 'file',
+    'application/json': 'file',
+    'application/jsonl': 'file',
+    'application/x-ndjson': 'file',
+    'text/x-jsonl': 'file',
 };
 
 /** Every mimeType accepted as an attachment. */
 export const SUPPORTED_MIME_TYPES: string[] = Object.keys(MIME_TO_KIND);
+
+/**
+ * Kinds whose bytes are fed to the multimodal embedding model. `file` is
+ * deliberately excluded — those attachments are stored as blobs only.
+ */
+export const EMBEDDABLE_ATTACHMENT_KINDS: ReadonlySet<AttachmentKind> = new Set([
+    'image',
+    'audio',
+    'video',
+    'pdf',
+]);
+
+/** True when an attachment's bytes should be embedded (not blob-only). */
+export function isEmbeddableAttachmentKind(kind: AttachmentKind): boolean {
+    return EMBEDDABLE_ATTACHMENT_KINDS.has(kind);
+}
 
 /**
  * File-extension → mimeType, for inferring an attachment's type from a local
@@ -48,6 +70,10 @@ const EXT_TO_MIME: Record<string, string> = {
     '.mov': 'video/quicktime',
     '.qt': 'video/quicktime',
     '.pdf': 'application/pdf',
+    '.txt': 'text/plain',
+    '.json': 'application/json',
+    '.jsonl': 'application/x-ndjson',
+    '.ndjson': 'application/x-ndjson',
 };
 
 /** Every file extension that maps to a supported attachment mimeType. */
@@ -71,6 +97,11 @@ export interface AttachmentLimits {
     maxVideo: number;
     /** Max PDF attachments per memory (Gemini caps documents at 1 file/request). */
     maxPdf: number;
+    /**
+     * Max blob-only `file` attachments per memory (e.g. full chat transcripts).
+     * Not embedded; raised independently of Gemini media caps.
+     */
+    maxFiles: number;
     /** Per-attachment decoded-byte ceiling. */
     maxBytesPerAttachment: number;
     /** Max audio duration in seconds (enforced only when detectable). */
@@ -86,6 +117,7 @@ export const DEFAULT_ATTACHMENT_LIMITS: AttachmentLimits = {
     maxAudio: 1,
     maxVideo: 1,
     maxPdf: 1,
+    maxFiles: 4,
     maxBytesPerAttachment: 20 * 1024 * 1024,
     maxAudioSeconds: 180,
     maxVideoSeconds: 120,
@@ -186,14 +218,21 @@ export async function validateAttachments(
     limits: AttachmentLimits = DEFAULT_ATTACHMENT_LIMITS,
 ): Promise<ValidatedAttachment[]> {
     const result: ValidatedAttachment[] = [];
-    const counts: Record<AttachmentKind, number> = { image: 0, audio: 0, video: 0, pdf: 0 };
+    const counts: Record<AttachmentKind, number> = { image: 0, audio: 0, video: 0, pdf: 0, file: 0 };
     const capFor: Record<AttachmentKind, number> = {
         image: limits.maxImages,
         audio: limits.maxAudio,
         video: limits.maxVideo,
         pdf: limits.maxPdf,
+        file: limits.maxFiles,
     };
-    const labelFor: Record<AttachmentKind, string> = { image: 'image', audio: 'audio', video: 'video', pdf: 'PDF' };
+    const labelFor: Record<AttachmentKind, string> = {
+        image: 'image',
+        audio: 'audio',
+        video: 'video',
+        pdf: 'PDF',
+        file: 'file',
+    };
     // base64 inflates bytes by ~4/3; reject oversized payloads by string length
     // BEFORE allocating the decoded Buffer so a huge input can't OOM the process.
     const maxBase64Len = Math.ceil(limits.maxBytesPerAttachment * 1.37) + 256;

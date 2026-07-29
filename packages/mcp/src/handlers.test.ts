@@ -28,6 +28,8 @@ class FakeBackend implements MemoryBackend {
     recallResults: MemoryRecallResult[] = [];
     listResults: MemorySummary[] = [];
     saveResult?: SaveResult;
+    /** Optional attachment bytes keyed by `${memoryId}::${attachmentId}`. */
+    attachmentBytes = new Map<string, AttachmentBytes>();
 
     constructor(initial: Memory | null) {
         this.memory = initial;
@@ -81,8 +83,8 @@ class FakeBackend implements MemoryBackend {
         return { imported: 0, failed: 0, errors: [] };
     }
 
-    async readAttachment(_memoryId: string, _attachmentId: string): Promise<AttachmentBytes | null> {
-        return null;
+    async readAttachment(memoryId: string, attachmentId: string): Promise<AttachmentBytes | null> {
+        return this.attachmentBytes.get(`${memoryId}::${attachmentId}`) ?? null;
     }
 }
 
@@ -402,6 +404,82 @@ test('save_memory renders multiple similar candidates in order', async () => {
 
     assert.match(text, /1\. "First"/);
     assert.match(text, /2\. "Second"/);
+    cleanup();
+});
+
+// ---------------------------------------------------------------------------
+// read_attachment (Option C: transcript / blob fetch)
+// ---------------------------------------------------------------------------
+
+test('read_attachment returns utf-8 transcript text for a single file attachment', async () => {
+    const { statsStore, cleanup } = makeStatsStore();
+    const body = '{"type":"user","message":"hello"}\n';
+    const memory: Memory = {
+        id: 'chat:factory:s1',
+        title: 'Did a task',
+        content: 'Summary\n\n---\nFull transcript: /tmp/x.jsonl\n',
+        attachments: [{
+            id: 'transcript',
+            kind: 'file',
+            mimeType: 'application/x-ndjson',
+            byteLength: Buffer.byteLength(body),
+            caption: 'Full transcript (source file)',
+        }],
+        createdAt: 1,
+        updatedAt: 1,
+    };
+    const backend = new FakeBackend(memory);
+    backend.attachmentBytes.set('chat:factory:s1::transcript', {
+        mimeType: 'application/x-ndjson',
+        byteLength: Buffer.byteLength(body),
+        caption: 'Full transcript (source file)',
+        data: Buffer.from(body),
+    });
+    const handlers = new MemoryToolHandlers(backend, statsStore);
+
+    const result = await handlers.handleReadAttachment({ memory_id: 'chat:factory:s1' });
+    assert.equal(result.isError, undefined);
+    assert.match(result.content[0].text, /encoding: utf-8/);
+    assert.match(result.content[0].text, /hello/);
+    assert.match(result.content[0].text, /caption: Full transcript \(source file\)/);
+    cleanup();
+});
+
+test('read_attachment truncates when max_chars is small', async () => {
+    const { statsStore, cleanup } = makeStatsStore();
+    const body = 'abcdefghij';
+    const memory: Memory = {
+        id: 'mem-1',
+        title: 'T',
+        content: 'c',
+        attachments: [{ id: '0', kind: 'file', mimeType: 'text/plain', byteLength: 10 }],
+        createdAt: 1,
+        updatedAt: 1,
+    };
+    const backend = new FakeBackend(memory);
+    backend.attachmentBytes.set('mem-1::0', {
+        mimeType: 'text/plain',
+        byteLength: 10,
+        data: Buffer.from(body),
+    });
+    const handlers = new MemoryToolHandlers(backend, statsStore);
+    const result = await handlers.handleReadAttachment({ memory_id: 'mem-1', max_chars: 4 });
+    assert.equal(result.isError, undefined);
+    assert.match(result.content[0].text, /truncated: true/);
+    assert.match(result.content[0].text, /abcd/);
+    assert.doesNotMatch(result.content[0].text, /abcdefghij/);
+    cleanup();
+});
+
+test('read_attachment requires memory_id and errors on missing memory', async () => {
+    const { statsStore, cleanup } = makeStatsStore();
+    const handlers = new MemoryToolHandlers(new FakeBackend(null), statsStore);
+    const missingArg = await handlers.handleReadAttachment({});
+    assert.equal(missingArg.isError, true);
+    assert.match(missingArg.content[0].text, /memory_id/);
+    const missingMem = await handlers.handleReadAttachment({ memory_id: 'nope' });
+    assert.equal(missingMem.isError, true);
+    assert.match(missingMem.content[0].text, /Memory not found/);
     cleanup();
 });
 

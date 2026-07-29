@@ -1,11 +1,14 @@
 import * as fs from 'node:fs';
 import {
+    attachTranscriptToRecord,
     DEFAULT_DIGEST_MODEL,
     DIGEST_MODELS,
     DIGEST_PRICING_AS_OF,
+    hasTranscriptAttachment,
     IngestManager,
     IngestSourceFolder,
     MemoryBackend,
+    MemoryExportRecord,
     RemoteMemoryBackend,
     ServerVersionInfo,
     antigravityPresetFolder,
@@ -55,7 +58,8 @@ Usage:
   gemdex mode local
   gemdex mode remote <name>
   gemdex status
-  gemdex import-local-to-remote [name]
+  gemdex import-local-to-remote [name] [--attach-transcripts]
+  gemdex backfill-transcripts [remote-name] [--force] [--dry-run]
   gemdex ingest-history [--source claude|factory|codex|antigravity|PATH]... [--model MODEL]
                         [--batch] [--dry-run] [--collect]
 
@@ -64,12 +68,23 @@ remote + token, verifies the server is reachable, authenticated, and version-
 compatible, switches Gemdex into remote mode, optionally imports your local
 memories (--import-local), and prints the exact agent command to run.
 
+import-local-to-remote copies local Lance memories into a named remote. Pass
+--attach-transcripts to parse each digest's "Full transcript: <path>" footer,
+read the file when present, and include it as a non-embedded file attachment
+(skipped with a message when the path is missing — does not fail the run).
+
+backfill-transcripts re-imports digest memories that only have a path footer,
+attaching the full transcript blob. With no remote name, uses the active
+backend (local or remote). With a remote name, targets that remote. Missing
+files are skipped with a clear message.
+
 ingest-history distills coding-agent chat transcripts (Claude Code, Factory
 CLI, Codex, Antigravity, or any folder of .jsonl sessions) into one memory per
-session. Only never-before-ingested sessions are processed; previously ingested
-sessions are never reprocessed, even if their transcript later changes. Defaults
-to detected presets. --dry-run prints the scan + cost estimate; --batch submits a
-Gemini Batch API job (50% cost, results within ~24h) that you collect later with
+session (digest text + full transcript as a non-embedded attachment). Only
+never-before-ingested sessions are processed; previously ingested sessions are
+never reprocessed, even if their transcript later changes. Defaults to detected
+presets. --dry-run prints the scan + cost estimate; --batch submits a Gemini
+Batch API job (50% cost, results within ~24h) that you collect later with
 --collect. Needs a local GEMINI_API_KEY.
 `;
 }
@@ -180,16 +195,69 @@ interface MigrationResult {
     created: number;
     updated: number;
     skipped: number;
+    /** Transcripts attached during migrate when --attach-transcripts is set. */
+    transcriptsAttached?: number;
+    transcriptsMissing?: number;
+}
+
+interface BackfillTranscriptsResult {
+    attached: number;
+    already: number;
+    missing: number;
+    noPath: number;
+    failed: number;
+}
+
+/**
+ * Optionally attach full-transcript blobs to digest export records by reading
+ * the path footed in content. Missing files are counted and skipped.
+ */
+function maybeAttachTranscripts(
+    records: MemoryExportRecord[],
+    attach: boolean,
+    io: CliIo,
+): { records: MemoryExportRecord[]; attached: number; missing: number } {
+    if (!attach) return { records, attached: 0, missing: 0 };
+    let attached = 0;
+    let missing = 0;
+    const out: MemoryExportRecord[] = [];
+    for (const record of records) {
+        const result = attachTranscriptToRecord(record, { force: false });
+        if (result.status === 'attached') {
+            attached += 1;
+            out.push(result.record);
+        } else if (result.status === 'missing') {
+            missing += 1;
+            io.stderr(
+                `Skipped transcript for ${record.id}: file not found` +
+                (result.filePath ? ` (${result.filePath})` : '') + `\n`,
+            );
+            out.push(record);
+        } else {
+            out.push(record);
+        }
+    }
+    return { records: out, attached, missing };
 }
 
 async function migrateLocalToRemote(
     local: MemoryBackend,
     remote: MemoryBackend,
     io: CliIo,
+    options: { attachTranscripts?: boolean } = {},
 ): Promise<MigrationResult> {
-    const records = await local.exportAll();
-    const result: MigrationResult = { created: 0, updated: 0, skipped: 0 };
-    for (const record of records) {
+    const exported = await local.exportAll();
+    const prepared = maybeAttachTranscripts(exported, options.attachTranscripts === true, io);
+    const result: MigrationResult = {
+        created: 0,
+        updated: 0,
+        skipped: 0,
+        ...(options.attachTranscripts === true && {
+            transcriptsAttached: prepared.attached,
+            transcriptsMissing: prepared.missing,
+        }),
+    };
+    for (const record of prepared.records) {
         try {
             const existed = await remote.get(record.id) !== null;
             const imported = await remote.importRecords([record]);
@@ -203,6 +271,71 @@ async function migrateLocalToRemote(
         } catch (error) {
             result.skipped += 1;
             io.stderr(`Skipped ${record.id}: ${errorMessage(error)}\n`);
+        }
+    }
+    return result;
+}
+
+/**
+ * Re-import digests that only have a path footer, attaching the transcript file
+ * when present. Idempotent: already-attached digests are skipped unless force.
+ */
+async function backfillTranscripts(
+    backend: MemoryBackend,
+    io: CliIo,
+    options: { force?: boolean; dryRun?: boolean } = {},
+): Promise<BackfillTranscriptsResult> {
+    const records = await backend.exportAll();
+    const result: BackfillTranscriptsResult = {
+        attached: 0, already: 0, missing: 0, noPath: 0, failed: 0,
+    };
+    for (const record of records) {
+        // Only touch digests / records that look like they should have a transcript.
+        const looksLikeDigest = record.id.startsWith('chat:')
+            || record.content.includes('Full transcript:');
+        if (!looksLikeDigest) continue;
+
+        if (!options.force && hasTranscriptAttachment(record.attachments)) {
+            result.already += 1;
+            continue;
+        }
+
+        const attached = attachTranscriptToRecord(record, { force: options.force === true });
+        if (attached.status === 'already') {
+            result.already += 1;
+            continue;
+        }
+        if (attached.status === 'no_path') {
+            result.noPath += 1;
+            continue;
+        }
+        if (attached.status === 'missing') {
+            result.missing += 1;
+            io.stderr(
+                `Missing transcript for ${record.id}` +
+                (attached.filePath ? `: ${attached.filePath}` : '') + `\n`,
+            );
+            continue;
+        }
+
+        if (options.dryRun) {
+            result.attached += 1;
+            io.stdout(`[dry-run] would attach transcript to ${record.id}\n`);
+            continue;
+        }
+
+        try {
+            const imported = await backend.importRecords([attached.record]);
+            if (imported.imported === 1) {
+                result.attached += 1;
+            } else {
+                result.failed += 1;
+                const detail = imported.errors[0]?.error;
+                io.stderr(`Failed ${record.id}${detail ? `: ${detail}` : ''}\n`);
+            }
+        } catch (error) {
+            result.failed += 1;
+            io.stderr(`Failed ${record.id}: ${errorMessage(error)}\n`);
         }
     }
     return result;
@@ -242,9 +375,25 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
         const localConfig = createConfig((name) => name === 'GEMDEX_MODE' ? 'local' : store.getEnv(name));
         return createMemoryBackend(localConfig);
     });
+    const createActiveBackend = dependencies.createActiveBackend ?? (() => {
+        const mode = store.getEnv('GEMDEX_MODE')?.toLowerCase() === 'remote' ? 'remote' : 'local';
+        if (mode === 'remote') {
+            const selected = resolveRemote(store, undefined);
+            return createRemoteBackend(selected.remote, selected.token);
+        }
+        return createLocalBackend();
+    });
 
     const [command, subcommand] = args;
-    const CLI_COMMANDS = ['remote', 'mode', 'status', 'init-remote', 'import-local-to-remote', 'ingest-history'];
+    const CLI_COMMANDS = [
+        'remote',
+        'mode',
+        'status',
+        'init-remote',
+        'import-local-to-remote',
+        'backfill-transcripts',
+        'ingest-history',
+    ];
     if (!CLI_COMMANDS.includes(command)) return null;
 
     try {
@@ -398,13 +547,48 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
         }
 
         if (command === 'import-local-to-remote') {
-            const selected = resolveRemote(store, args[1]);
+            const attachTranscripts = args.includes('--attach-transcripts');
+            const nameArg = args.slice(1).find((a) => !a.startsWith('--'));
+            const selected = resolveRemote(store, nameArg);
             const local = createLocalBackend();
             const remote = createRemoteBackend(selected.remote, selected.token);
-            const result = await migrateLocalToRemote(local, remote, io);
+            const result = await migrateLocalToRemote(local, remote, io, { attachTranscripts });
             io.stdout(`Migration to "${selected.name}" complete.\n`);
             io.stdout(`Created: ${result.created}\nUpdated: ${result.updated}\nSkipped: ${result.skipped}\n`);
+            if (attachTranscripts) {
+                io.stdout(
+                    `Transcripts attached: ${result.transcriptsAttached ?? 0}\n` +
+                    `Transcripts missing: ${result.transcriptsMissing ?? 0}\n`,
+                );
+            }
             return result.skipped === 0 ? 0 : 1;
+        }
+
+        if (command === 'backfill-transcripts') {
+            const force = args.includes('--force');
+            const dryRun = args.includes('--dry-run');
+            const nameArg = args.slice(1).find((a) => !a.startsWith('--'));
+            let backend: MemoryBackend;
+            let targetLabel: string;
+            if (nameArg) {
+                const selected = resolveRemote(store, nameArg);
+                backend = createRemoteBackend(selected.remote, selected.token);
+                targetLabel = `remote "${selected.name}"`;
+            } else {
+                backend = createActiveBackend();
+                targetLabel = 'active backend';
+            }
+            const result = await backfillTranscripts(backend, io, { force, dryRun });
+            io.stdout(
+                `Backfill transcripts on ${targetLabel}` +
+                (dryRun ? ' (dry-run)' : '') + `:\n` +
+                `  attached: ${result.attached}\n` +
+                `  already had transcript: ${result.already}\n` +
+                `  missing file: ${result.missing}\n` +
+                `  no path footer: ${result.noPath}\n` +
+                `  failed: ${result.failed}\n`,
+            );
+            return result.failed === 0 ? 0 : 1;
         }
 
         io.stderr(usage());

@@ -93,17 +93,20 @@ Two facts that explain most of the codebase:
 - **BYOI wire contract / compat floor** (`/v1`, bearer auth, `minClientVersion`):
   server + [docs/BYOI_REMOTE_MODE.md](docs/BYOI_REMOTE_MODE.md).
 
-## Five tools, no delete
+## Six tools, no delete
 
 The MCP surface is `save_memory`, `recall`, `update_memory`, the read-only
 `list_memories` (browse summaries newest-first, optional substring filter — for
 orienting and getting exact ids; `recall` remains the relevance-ranked path),
-and `report_outcome` (record whether a recalled memory `worked`/`failed`/`stale`
+`report_outcome` (record whether a recalled memory `worked`/`failed`/`stale`
 — the outcome feedback loop; per-client stats ledger, no LanceDB writes, opt-in
-trust-weighted re-ranking via `GEMDEX_TRUST_RANKING`). **There is no agent
-delete tool by design** — deletion is a deliberate human action in the desktop
-app (the sidecar/core `DELETE /memories/:id` route exists; the MCP tools
-deliberately don't expose it).
+trust-weighted re-ranking via `GEMDEX_TRUST_RANKING`), and `read_attachment`
+(fetch attachment/transcript bytes as UTF-8 or base64 for a memory id — used for
+chat digests that store the full session as a non-embedded `file` blob; works
+local + remote without `GEMINI_API_KEY`). **There is no agent delete tool by
+design** — deletion is a deliberate human action in the desktop app (the
+sidecar/core `DELETE /memories/:id` route exists; the MCP tools deliberately
+don't expose it).
 
 ## Conventions (TS packages)
 

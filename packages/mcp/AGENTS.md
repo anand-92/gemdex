@@ -17,13 +17,13 @@ build/test/lint/style rules are repo-wide — see the root `AGENTS.md`.
 |------|------|
 | `src/index.ts` | The single entry point + `bin`. Reroutes console→stderr, decides which of the three modes to run, defines the five MCP tool **schemas/descriptions**, constructs the `MemoryStatsStore`, runs the stdio server. |
 | `src/serve.ts` | `gemdex serve` localhost HTTP sidecar: bind/token/origin auth + sidecar-only `/config` & `/settings*` routes; delegates data routes to core. |
-| `src/handlers.ts` | MCP tool **logic** (`save_memory`/`recall`/`update_memory`/`list_memories`/`report_outcome`): arg validation, attachment resolution, result formatting, recall stats bump + track-record rendering + opt-in trust re-ranking, save-time similar-memory advisory rendering. Never throws to the protocol. |
+| `src/handlers.ts` | MCP tool **logic** (`save_memory`/`recall`/`update_memory`/`list_memories`/`report_outcome`/`read_attachment`): arg validation, attachment resolution, result formatting, recall stats bump + track-record rendering + opt-in trust re-ranking, save-time similar-memory advisory rendering, transcript/blob text fetch. Never throws to the protocol. |
 | `src/cli.ts` | CLI verbs (`init-remote`, `remote …`, `mode …`, `status`, `import-local-to-remote`). |
 | `src/config.ts` | `createConfig()` — turns env into a `GemdexConfig`; `resolveMode` picks local vs remote. Also `--help`. |
 | `src/memory.ts` | `createMemoryBackend(config)` — the one place that picks `LocalMemoryBackend` vs `RemoteMemoryBackend`. |
 | `src/cli-config.ts` | `ClientConfigStore` — reads/writes `~/.gemdex/config.json` (named remotes) and `~/.gemdex/.env` (tokens, `0600`). |
 | `src/embedding.ts` | `createEmbeddingInstance` — **throws if no `GEMINI_API_KEY`** in local mode. |
-| `src/tool-names.ts` | The frozen tuple `['save_memory','recall','update_memory','list_memories','report_outcome']`; indices are referenced positionally in `index.ts`. |
+| `src/tool-names.ts` | The frozen tuple `['save_memory','recall','update_memory','list_memories','report_outcome','read_attachment']`; indices are referenced positionally in `index.ts`. |
 | `integration/byoi.mjs` | End-to-end BYOI harness (real server + built mcp dist + Postgres/pgvector). |
 
 ## One binary, three modes — how `main()` routes

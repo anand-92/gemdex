@@ -8,6 +8,8 @@ enum AttachmentKind: String, Codable, Sendable {
     case audio
     case video
     case pdf
+    /// Blob-only (non-embedded) source files such as full chat transcripts.
+    case file
 
     static func from(mimeType: String) -> AttachmentKind? {
         let m = mimeType.lowercased()
@@ -15,6 +17,13 @@ enum AttachmentKind: String, Codable, Sendable {
         if m.hasPrefix("audio/") { return .audio }
         if m.hasPrefix("video/") { return .video }
         if m == "application/pdf" || m.hasSuffix("/pdf") { return .pdf }
+        if m == "text/plain"
+            || m == "application/json"
+            || m == "application/jsonl"
+            || m == "application/x-ndjson"
+            || m == "text/x-jsonl" {
+            return .file
+        }
         return nil
     }
 }

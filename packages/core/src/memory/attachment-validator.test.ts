@@ -93,8 +93,19 @@ describe('validateAttachments', () => {
         expect(mimeToKind('application/pdf')).toBe('pdf');
         expect(mimeToKind('audio/wav')).toBe('audio');
         expect(mimeToKind('video/mp4')).toBe('video');
-        expect(mimeToKind('text/plain')).toBeUndefined();
+        expect(mimeToKind('text/plain')).toBe('file');
+        expect(mimeToKind('application/x-ndjson')).toBe('file');
         expect(SUPPORTED_MIME_TYPES.length).toBeGreaterThan(0);
+    });
+
+    it('accepts transcript-style file attachments without treating them as media', async () => {
+        const [a] = await validateAttachments([{
+            mimeType: 'application/x-ndjson',
+            data: b64('{"type":"user"}\n'),
+            caption: 'Full transcript (source file)',
+        }]);
+        expect(a.kind).toBe('file');
+        expect(a.caption).toBe('Full transcript (source file)');
     });
 
     it('accepts a PDF at or under the page limit', async () => {
@@ -151,7 +162,8 @@ describe('inferMimeTypeFromPath', () => {
     });
 
     it('returns undefined for unknown or missing extensions', () => {
-        expect(inferMimeTypeFromPath('notes.txt')).toBeUndefined();
+        expect(inferMimeTypeFromPath('notes.txt')).toBe('text/plain');
+        expect(inferMimeTypeFromPath('session.jsonl')).toBe('application/x-ndjson');
         expect(inferMimeTypeFromPath('archive.gif')).toBeUndefined();
         expect(inferMimeTypeFromPath('README')).toBeUndefined();
     });

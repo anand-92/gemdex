@@ -3,6 +3,7 @@ import * as crypto from "crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
+    attachTranscriptToRecord,
     HygieneManager,
     HygieneReport,
     HygieneReportStore,
@@ -412,8 +413,11 @@ async function migrateLocalToRemote(
     let skipped = 0;
     for (const record of records) {
         try {
-            const existed = await remote.get(record.id) !== null;
-            const result = await remote.importRecords([record]);
+            // Prefer attaching full transcripts when digests only have a path footer
+            // so remote clients can fetch bytes via read_attachment / HTTP.
+            const prepared = attachTranscriptToRecord(record).record;
+            const existed = await remote.get(prepared.id) !== null;
+            const result = await remote.importRecords([prepared]);
             if (result.imported !== 1) {
                 skipped += 1;
             } else if (existed) {
