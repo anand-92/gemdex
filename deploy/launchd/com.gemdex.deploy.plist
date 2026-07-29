@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Bring the Gemdex deploy stack up at login on a macOS always-on host (Mac Mini).
+
+  Install:
+    1. Edit the ensure-up.sh path below to your checkout — launchd needs an
+       absolute path and does NOT expand ~ inside ProgramArguments.
+    2. cp deploy/launchd/com.gemdex.deploy.plist ~/Library/LaunchAgents/
+    3. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.gemdex.deploy.plist
+    4. tail -f ~/.gemdex/deploy-launch.log
+
+  Uninstall:
+    launchctl bootout gui/$(id -u)/com.gemdex.deploy
+
+  Why a LaunchAgent (gui/, per-user) and not a LaunchDaemon: colima's VM runs as
+  your user, so a root daemon would not see its Docker socket. That means the
+  stack starts at LOGIN, not at boot — for a headless Mini, enable automatic
+  login, or the stack won't come back after a power cut.
+
+  KeepAlive is false on purpose: this script runs to completion and exits, it is
+  not a long-running process. `restart: unless-stopped` in compose is what keeps
+  containers alive; KeepAlive=true here would relaunch the script forever.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.gemdex.deploy</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <!-- EDIT: absolute path to deploy/scripts/ensure-up.sh in your checkout. -->
+    <string>/Users/CHANGEME/gemdex/deploy/scripts/ensure-up.sh</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <false/>
+
+  <!-- Also retry hourly: catches a Docker/colima restart that left the stack
+       down, and is cheap because the script is idempotent. -->
+  <key>StartInterval</key>
+  <integer>3600</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/CHANGEME/.gemdex/deploy-launch.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/CHANGEME/.gemdex/deploy-launch.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

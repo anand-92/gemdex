@@ -1,6 +1,10 @@
 packages:
   - packages/*
   - examples/*
+  # packages/web is a Python package (the BFF) with the SPA nested inside it, so
+  # the `packages/*` glob does not pick the frontend up. Listed explicitly so
+  # `pnpm install` and `pnpm --filter gemdex-web build` reach it.
+  - packages/web/frontend
 
 onlyBuiltDependencies:
   - "@lancedb/lancedb"

@@ -38,13 +38,15 @@ never a fragment**.
    │   localhost sidecar│   │ • file/S3 blobs      │   server
    │ • remote-mode CLI  │   │ • server-side embed  │
    └────────────────────┘   └──────────────────────┘
-              ▲
-              │ spawns sidecar over localhost (PORT/TOKEN handshake)
-   ┌──────────┴──────────┐
-   │ packages/app        │
-   │ native SwiftUI mac  │
-   │ (thin HTTP client)  │
-   └─────────────────────┘
+              ▲                          ▲
+              │ spawns sidecar over      │ HTTP /v1 over the compose network
+              │ localhost (PORT/TOKEN)   │ (BYOI bearer stays server-side)
+   ┌──────────┴──────────┐   ┌───────────┴──────────┐
+   │ packages/app        │   │ packages/web         │
+   │ native SwiftUI mac  │   │ React SPA + FastAPI  │
+   │ (thin HTTP client)  │   │ BFF. Browser manage  │
+   └─────────────────────┘   │ surface; has DELETE  │
+                             └──────────────────────┘
 ```
 
 Two facts that explain most of the codebase:
@@ -65,9 +67,28 @@ Two facts that explain most of the codebase:
 | `packages/core` | `gemdex-core` | The engine: chunking + parent-document recall, embeddings, LanceDB hybrid+RRF, the shared HTTP router, the backend interface. | [core/AGENTS.md](packages/core/AGENTS.md) |
 | `packages/mcp` | `gemdex-mcp` | One binary, three modes: MCP stdio tools, the `gemdex serve` localhost sidecar, the remote-mode CLI. | [mcp/AGENTS.md](packages/mcp/AGENTS.md) |
 | `packages/server` | `gemdex-server` | Self-hosted BYOI backend: thin `node:http` shell (`/v1`, auth, CORS, migrations) over Postgres/pgvector + file/S3 blobs, server-side embedding. | [server/AGENTS.md](packages/server/AGENTS.md) |
-| `packages/app` | — | Native SwiftUI macOS manage-only app; spawns the sidecar and is a thin HTTP client. Swift, not TS. | [app/AGENTS.md](packages/app/AGENTS.md) |
+| `packages/mcp-http` | `gemdex-mcp-http` | **Python.** The Streamable HTTP MCP surface (FastMCP v4) at `/mcp` for remote agents; OAuth 2.1 single-user auth. Thin wrapper over the BYOI `/v1` API — cannot import core. | [mcp-http/AGENTS.md](packages/mcp-http/AGENTS.md) |
+| `packages/web` | `gemdex-web` | **Python + React.** The browser manager UI: a Vite/TS SPA over a FastAPI backend-for-frontend. Google single-user login; the self-host manage surface, and it has delete. | [web/AGENTS.md](packages/web/AGENTS.md) |
+| `packages/app` | — | Native SwiftUI macOS manage-only app; spawns the sidecar and is a thin HTTP client. Swift, not TS. **Maintenance-only** — `packages/web` is the primary manage surface; keep this working, don't delete it, land new manage features in `web`. | [app/AGENTS.md](packages/app/AGENTS.md) |
 
-`docs/` holds the BYOI operations guide and the remote-mode wire contract.
+`deploy/` is the reference Compose stack for the full setup — BYOI + MCP (agents)
++ web manager (humans) behind a public HTTPS edge — see
+[deploy/README.md](deploy/README.md). `scripts/install.sh` is the one-line
+installer that stands that stack up locally.
+
+`docs/` map:
+
+| Doc | What it is |
+|-----|------------|
+| [BYOI_OPERATIONS.md](docs/BYOI_OPERATIONS.md) | Operating a BYOI backend; security and custody model |
+| [BYOI_REMOTE_MODE.md](docs/BYOI_REMOTE_MODE.md) | The `/v1` wire contract: auth, attachments, compat floor, ranking invariants |
+| [SELF_HOST_DEPLOY.md](docs/SELF_HOST_DEPLOY.md) | Canonical end-to-end public deploy: Compose, Google OAuth, HTTPS edge, exposure proof |
+| [GO_FURTHER.md](docs/GO_FURTHER.md) | DNS/TLS, Render, Railway, VPS, local-vs-cloud split, cost/sizing |
+| [SECURITY_SELFHOST.md](docs/SECURITY_SELFHOST.md) | What the deployment enforces and where in the code; pre-launch checklist |
+| [CHAT_HISTORY.md](docs/CHAT_HISTORY.md) | The three ingestion paths (`sync-history`, web upload, host-local) and the deterministic-id invariant |
+
+When you change auth, exposure, or ingestion behaviour, `SECURITY_SELFHOST.md`
+and `CHAT_HISTORY.md` cite specific code paths — update them with the code.
 
 ## Cross-cutting mechanics (where to look)
 
@@ -104,9 +125,13 @@ trust-weighted re-ranking via `GEMDEX_TRUST_RANKING`), and `read_attachment`
 (fetch attachment/transcript bytes as UTF-8 or base64 for a memory id — used for
 chat digests that store the full session as a non-embedded `file` blob; works
 local + remote without `GEMINI_API_KEY`). **There is no agent delete tool by
-design** — deletion is a deliberate human action in the desktop app (the
-sidecar/core `DELETE /memories/:id` route exists; the MCP tools deliberately
-don't expose it).
+design** — deletion is a deliberate human action (the sidecar/core
+`DELETE /memories/:id` route exists; the MCP tools deliberately don't expose it).
+
+The human delete surfaces are the desktop app and, for a self-hosted
+deployment, the web manager (`packages/web`, behind its own login and a confirm
+dialog). Keep it that way: making the surfaces "consistent" by adding a delete
+tool to either MCP transport would discard the property on purpose here.
 
 ## Conventions (TS packages)
 

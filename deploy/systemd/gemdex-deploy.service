@@ -1,0 +1,46 @@
+# Bring the Gemdex deploy stack up at boot on a Linux always-on host (VPS).
+#
+# Install (as root):
+#   1. Edit User=, WorkingDirectory= and ExecStart= below for your checkout.
+#   2. cp deploy/systemd/gemdex-deploy.service /etc/systemd/system/
+#   3. systemctl daemon-reload && systemctl enable --now gemdex-deploy.service
+#   4. journalctl -u gemdex-deploy -f
+#
+# Runs as a normal system unit (not a user unit) because on Linux the Docker
+# socket is root/docker-group owned and available at boot — no VM to wait for,
+# which is the one way this is simpler than the macOS LaunchAgent.
+
+[Unit]
+Description=Gemdex deploy stack (BYOI + Streamable HTTP MCP)
+Documentation=https://github.com/nikships/gemdex/blob/main/docs/SELF_HOST_DEPLOY.md
+# Ordering only — Requires= would tear this unit down whenever docker restarts.
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+
+[Service]
+# Type=oneshot + RemainAfterExit: the script starts containers and exits.
+# Compose's `restart: unless-stopped` owns keeping them running, so systemd
+# should not treat the script's exit as a crash.
+Type=oneshot
+RemainAfterExit=yes
+
+# EDIT: the user that owns the checkout and is in the `docker` group.
+User=CHANGEME
+# EDIT: absolute path to the deploy/ directory.
+WorkingDirectory=/home/CHANGEME/gemdex/deploy
+ExecStart=/home/CHANGEME/gemdex/deploy/scripts/ensure-up.sh
+
+# Graceful stop. Note this stops the CONTAINERS, so `systemctl stop` is a real
+# shutdown of the stack, not just of this unit.
+ExecStop=/usr/bin/docker compose stop
+
+# ensure-up.sh polls for health for up to ~5 minutes on a cold start (image
+# pulls, migrations); the default 90s timeout would kill it mid-wait.
+TimeoutStartSec=600
+
+# Retry a failed start — usually a transient dependency (docker not ready yet).
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

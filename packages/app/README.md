@@ -1,5 +1,12 @@
 # Gemdex Memory — desktop app
 
+> **Maintenance-only.** This app is no longer the primary way to manage a Gemdex
+> memory layer. It manages a **local** `~/.gemdex` pool on a single Mac; the
+> [web manager](../web/README.md) is the surface for a self-hosted deployment —
+> any browser, behind your Google login, against the shared pool. The app still
+> works and still ships; expect bug fixes, not new features. It is not going
+> away, and nothing here has been removed.
+
 A native, **manage-only** desktop app for the [Gemdex](https://github.com/anand-92/gemdex)
 memory layer, built in **SwiftUI** for macOS (Apple Silicon). It opens straight
 into your memory layer to browse, create, edit, delete, export, and import

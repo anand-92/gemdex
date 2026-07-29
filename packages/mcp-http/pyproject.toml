@@ -1,0 +1,36 @@
+[project]
+name = "gemdex-mcp-http"
+version = "1.0.37"
+description = "Streamable HTTP MCP transport for Gemdex — FastMCP v4 tools over a colocated BYOI server"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Nikhil Anand" }]
+
+# FastMCP 4 is a PRERELEASE — pin the exact version (see README "Beta caveats").
+dependencies = ["fastmcp==4.0.0b1"]
+
+[project.scripts]
+gemdex-mcp-http = "gemdex_mcp_http.server:main"
+
+# uv allows prereleases only for packages named explicitly, and `fastmcp-slim`
+# arrives transitively at the same version as `fastmcp`. Constraining it here
+# keeps the rest of the graph on stable releases (`--prerelease allow` would
+# opt everything in). The `mcp` SDK needs NO constraint — it ships stable, and
+# pinning a prerelease of it would break resolution.
+[tool.uv]
+constraint-dependencies = ["fastmcp-slim==4.0.0b1"]
+
+[dependency-groups]
+dev = ["pytest>=8.3", "pytest-asyncio>=1.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gemdex_mcp_http"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

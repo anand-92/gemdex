@@ -40,10 +40,13 @@ across every repo and every session.
 - 🔌 **Plug-and-play** — speaks MCP over stdio, so any compatible client
   (Claude Code, Cursor, Codex CLI, Windsurf, Cline, Continue, Zed…) works
   instantly.
-- 🪶 **Local by default** — use embedded LanceDB at `~/.gemdex`, or connect
-  multiple machines to a Gemdex Server running in infrastructure you own.
-- 🖥️ **Desktop manager** — a native app to browse / edit / delete / export /
-  import your memory layer.
+- 🪶 **Local by default, self-hosted when you want more** — start with embedded
+  LanceDB at `~/.gemdex`, or run the whole stack on infrastructure you own with
+  [one command](#self-host-the-whole-stack-one-command) and share one memory
+  pool across every machine.
+- 🌐 **Browser manager** — the self-hosted stack ships a web UI (behind your
+  Google login) to browse / edit / delete / export / import, and to upload chat
+  transcripts.
 
 ## The motivating workflows
 
@@ -58,7 +61,22 @@ Different machine, different app:
   "Notarize and sign this build — the credentials and steps are in my memory layer."
 ```
 
-## Quickstart (under a minute)
+## Two ways to run it
+
+|  | **Local** | **Self-hosted** |
+|---|---|---|
+| Store | Embedded LanceDB at `~/.gemdex` | Postgres/pgvector + blob storage you own |
+| Setup | Point your agent at `npx gemdex-mcp` | [One command](#self-host-the-whole-stack-one-command) |
+| Needs a Gemini key on each machine | Yes | **No** — the server embeds |
+| Shared across machines | No, one pool per machine | Yes, one pool for everything |
+| Human manage surface | The [macOS app](#the-desktop-app-maintenance-only) | The web manager in your browser |
+| Remote agents | stdio only | HTTPS MCP endpoint, OAuth-gated |
+
+Start local; move to self-hosted when you want one pool across machines or agents
+that aren't on your laptop. Both speak the same MCP tools, so nothing about how
+you use Gemdex changes.
+
+## Quickstart — local (under a minute)
 
 There's **no setup step** for the store — LanceDB is embedded and persists at
 `~/.gemdex/lance` automatically the first time you save a memory.
@@ -226,7 +244,17 @@ default; disable with `GEMDEX_SIMILAR_ON_SAVE=false` or loosen/tighten the bar
 with `GEMDEX_SIMILAR_THRESHOLD`. Local mode only in v1 — a BYOI remote save
 simply carries no `similar` field yet.
 
-## The desktop app
+## The desktop app (maintenance-only)
+
+> **The macOS app is no longer the primary manage surface.** It still works and
+> is still shipped, but it manages a **local** `~/.gemdex` pool on one Mac. New
+> work goes into the [web manager](packages/web/README.md), which runs against
+> your self-hosted pool from any browser, behind your Google login, and is the
+> surface that gets features like session upload and memory hygiene at
+> deployment scale. The app is in maintenance mode: bug fixes, no new features.
+>
+> Use the app if you're local-only on a Mac and want a native window. Otherwise
+> [self-host](#self-host-the-whole-stack-one-command) and use the browser.
 
 A native, **manage-only** SwiftUI app for macOS (Apple Silicon) that opens
 straight into your memory layer:
@@ -311,7 +339,42 @@ Run Gemdex Server with Postgres/pgvector and file or S3-compatible attachment
 storage, then connect MCP, CLI, and desktop clients to the same global memory
 pool. Embedding runs on the server, so remote clients do not need a Gemini key.
 
-It's two commands. On the server host:
+### Self-host the whole stack (one command)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/anand-92/gemdex/main/scripts/install.sh | bash
+```
+
+Brings up Postgres, the memory API, the [Streamable HTTP MCP
+endpoint](packages/mcp-http/README.md) and the [web manager](packages/web/README.md);
+generates every secret; waits for migrations; **verifies a real save and recall**;
+then prints a ready-to-paste MCP client config. It asks for one thing — a free
+[Google AI Studio key](https://aistudio.google.com/apikey) — or reads
+`GEMINI_API_KEY` from the environment.
+
+Loopback-only by default. Add `--lan` to reach it from your other devices:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/anand-92/gemdex/main/scripts/install.sh | bash -s -- --lan
+```
+
+Re-running is safe and is the upgrade path: existing secrets are never
+regenerated and no volume is removed. `--help` lists the flags (alternate ports,
+install directory, pinned ref).
+
+Then, when you want more than localhost:
+
+| Guide | What it covers |
+|-------|----------------|
+| [Self-host deploy](docs/SELF_HOST_DEPLOY.md) | The canonical end-to-end setup: Compose stack, Google OAuth, public HTTPS edge, and a proof that the memory plane isn't exposed |
+| [Go further](docs/GO_FURTHER.md) | DNS + TLS, running on Render or Railway, a VPS, what stays local vs cloud, and cost/sizing |
+| [Security notes](docs/SECURITY_SELFHOST.md) | What is actually enforced, where in the code, and the pre-launch checklist |
+| [Chat history](docs/CHAT_HISTORY.md) | The three ingestion paths and which to use |
+
+### Or just the memory server
+
+If you only want the BYOI backend — no MCP endpoint, no web manager — it's two
+commands. On the server host:
 
 ```bash
 git clone https://github.com/anand-92/gemdex.git
@@ -365,7 +428,9 @@ console.log(hits[0].content); // the full memory, never a fragment
 | [`gemdex-core`](packages/core) | Memory store (parent-document chunking), Gemini embedding client, embedded LanceDB hybrid retrieval |
 | [`gemdex-mcp`](packages/mcp) | MCP server (`save_memory`/`recall`/`update_memory`/`list_memories`/`report_outcome`) + `gemdex serve` localhost sidecar |
 | [`gemdex-server`](packages/server) | Self-hosted BYOI HTTP backend using Postgres/pgvector and file or S3-compatible blobs |
-| [`packages/app`](packages/app) | native SwiftUI macOS app to manage the memory layer |
+| [`gemdex-mcp-http`](packages/mcp-http) | Python. Streamable HTTP MCP endpoint (`/mcp`) for remote agents; OAuth 2.1 single-user auth |
+| [`gemdex-web`](packages/web) | Python + React. Browser manager for a self-hosted pool: Google login, CRUD, session upload, hygiene |
+| [`packages/app`](packages/app) | native SwiftUI macOS app to manage a local pool (maintenance-only) |
 
 ## Configuration
 
@@ -399,7 +464,9 @@ redaction, encryption mandate, or safety enforcement. In local mode, records
 stay on the client except content sent to Gemini for embedding. In BYOI mode,
 records live in your server/database/blob infrastructure and embedding payloads
 are sent from that server to Gemini. Gemdex provides no hosted custody or
-account service. See the [BYOI security model](docs/BYOI_OPERATIONS.md#security-and-custody).
+account service. See the [BYOI security model](docs/BYOI_OPERATIONS.md#security-and-custody),
+and — if you plan to expose a deployment publicly —
+[the self-host security notes](docs/SECURITY_SELFHOST.md).
 
 ## Build from source
 

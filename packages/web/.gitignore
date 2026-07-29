@@ -1,0 +1,13 @@
+# Build output of `pnpm --filter gemdex-web build`. Generated into the Python
+# package so the BFF can serve it from one origin (see frontend/vite.config.ts),
+# but it is a build artifact: committing it would put minified bundles in every
+# diff and let the checked-in copy drift from the source.
+src/gemdex_web/static/
+
+# uv's virtualenv.
+.venv/
+
+# Python bytecode and test caches.
+__pycache__/
+*.py[cod]
+.pytest_cache/

@@ -34,6 +34,14 @@ RUN groupadd --system --gid 10001 gemdex \
 WORKDIR /app
 COPY --from=build --chown=gemdex:gemdex /opt/gemdex ./
 
+# Create the blob directory in the image, owned by the runtime user. Docker
+# seeds a fresh named volume from the image's directory *including its
+# ownership*; without this the volume mounts as root:root and every attachment
+# save fails with EACCES while /v1/health stays green. Mirrors the same
+# `install -d` in packages/mcp-http/Dockerfile.
+RUN install -d -o gemdex -g gemdex -m 0700 /var/lib/gemdex/blobs
+VOLUME /var/lib/gemdex/blobs
+
 USER gemdex
 EXPOSE 8765
 

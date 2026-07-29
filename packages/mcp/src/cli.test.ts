@@ -7,6 +7,8 @@ import type {
     AttachmentBytes,
     AttachmentCaptionUpdate,
     ImportRecordsResult,
+    IngestManager,
+    IngestTarget,
     Memory,
     MemoryAttachmentInput,
     MemoryBackend,
@@ -19,6 +21,7 @@ import type {
 import { ClientConfigStore } from './cli-config.js';
 import { runCli } from './cli.js';
 import { createConfig } from './config.js';
+import { SyncCredentialStore } from './sync-config.js';
 
 class FakeBackend implements MemoryBackend {
     records = new Map<string, MemoryExportRecord>();
@@ -81,17 +84,34 @@ function record(id: string): MemoryExportRecord {
     };
 }
 
+interface CliOverrides {
+    local?: MemoryBackend;
+    remote?: MemoryBackend;
+    fetch?: typeof fetch;
+    syncTarget?: IngestTarget;
+    openBrowser?: (url: string) => void;
+    ingestManager?: IngestManager;
+}
+
 async function withCli(
     callback: (
         run: (
             args: string[],
-            overrides?: { local?: MemoryBackend; remote?: MemoryBackend; fetch?: typeof fetch },
+            overrides?: CliOverrides,
         ) => Promise<{ code: number | null; stdout: string; stderr: string }>,
         store: ClientConfigStore,
+        rootDir: string,
     ) => Promise<void>,
 ): Promise<void> {
     const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gemdex-cli-'));
     const store = new ClientConfigStore({ rootDir });
+    // envManager falls back to the developer's real ~/.gemdex/.env, so pin the
+    // variables these paths read: process.env wins, keeping the suite identical
+    // on a laptop with a configured Gemdex and on a bare CI runner.
+    const savedEnv = { ...process.env };
+    process.env.GEMINI_API_KEY = 'test-key';
+    delete process.env.GEMDEX_SYNC_URL;
+    delete process.env.GEMDEX_MODE;
     try {
         await callback(async (args, overrides = {}) => {
             let stdout = '';
@@ -107,10 +127,17 @@ async function withCli(
                     (async () => new Response('{"ok":true}', { status: 200 })) as typeof fetch,
                 createLocalBackend: () => overrides.local ?? new FakeBackend(),
                 createRemoteBackend: () => overrides.remote ?? new FakeBackend(),
+                ...(overrides.syncTarget && { createSyncTarget: () => overrides.syncTarget! }),
+                ...(overrides.ingestManager && { createIngestManager: () => overrides.ingestManager! }),
+                openBrowser: overrides.openBrowser ?? (() => {
+                    throw new Error('the browser must not be opened in tests');
+                }),
+                createSyncCredentialStore: (mcpUrl) => new SyncCredentialStore(mcpUrl, { rootDir }),
             });
             return { code, stdout, stderr };
-        }, store);
+        }, store, rootDir);
     } finally {
+        process.env = savedEnv;
         await fs.rm(rootDir, { recursive: true, force: true });
     }
 }
@@ -259,5 +286,142 @@ test('migration preserves ids and reports created, updated, and skipped records'
         assert.match(result.stdout, /Skipped: 1/);
         assert.match(result.stderr, /Skipped bad-id: rejected/);
         assert.equal(remote.records.get('new-id')?.id, 'new-id');
+    });
+});
+
+/** A stand-in IngestManager: sync-history must not need a real Gemini key to be exercised. */
+function fakeIngestManager(target: { records: MemoryExportRecord[] }): IngestManager {
+    return {
+        scan: () => ({
+            processableFiles: ['/tmp/session.jsonl'],
+            skippedTrivialFiles: [],
+            pendingCount: 1,
+            estimatedInputTokens: 1000,
+            estimates: [{ model: 'gemini-2.5-flash', standardUsd: 0.01, batchUsd: 0.005 }],
+            buckets: { changedFiles: [], upToDate: [], skippedActive: [] },
+        }),
+        run: async (_options: unknown, ingestTarget: IngestTarget) => {
+            const result = await ingestTarget.importRecords([record('chat:factory:abc')]);
+            target.records.push(record('chat:factory:abc'));
+            return {
+                total: 1,
+                processed: result.imported,
+                failed: result.failed,
+                skipped: 0,
+            };
+        },
+        getProgress: () => ({ total: 1, processed: 0, failed: 0, skipped: 0 }),
+    } as unknown as IngestManager;
+}
+
+test('sync-history requires a host URL and rejects plaintext http off-loopback', async () => {
+    await withCli(async (run) => {
+        const missing = await run(['sync-history']);
+        assert.equal(missing.code, 1);
+        assert.match(missing.stderr, /--url https:\/\/your-host\/mcp or set GEMDEX_SYNC_URL/);
+
+        // A bearer over cleartext to a remote host is the one mistake that
+        // silently leaks the credential, so it is refused outright.
+        const insecure = await run(['sync-history', '--url', 'http://gemdex.example.com/mcp']);
+        assert.equal(insecure.code, 1);
+        assert.match(insecure.stderr, /must use https for a non-loopback host/);
+
+        const notAUrl = await run(['sync-history', '--url', 'not-a-url']);
+        assert.equal(notAUrl.code, 1);
+        assert.match(notAUrl.stderr, /not a valid absolute URL/);
+    });
+});
+
+test('sync-history resolves the host from --url, then GEMDEX_SYNC_URL', async () => {
+    await withCli(async (run, store, rootDir) => {
+        const collected: MemoryExportRecord[] = [];
+        const syncTarget: IngestTarget = {
+            importRecords: async (records) => {
+                collected.push(...records);
+                return { imported: records.length, failed: 0, errors: [] };
+            },
+        };
+        const manager = fakeIngestManager({ records: [] });
+
+        store.setEnv('GEMDEX_SYNC_URL', 'https://from-env.example.com/mcp');
+        const fromEnv = await run(
+            ['sync-history', '--source', rootDir],
+            { syncTarget, ingestManager: manager },
+        );
+        assert.equal(fromEnv.code, 0);
+        assert.match(fromEnv.stdout, /Syncing chat history to https:\/\/from-env\.example\.com\/mcp/);
+
+        // The explicit flag wins over the stored default.
+        const fromFlag = await run(
+            ['sync-history', '--url', 'https://from-flag.example.com/mcp/', '--source', rootDir],
+            { syncTarget, ingestManager: manager },
+        );
+        assert.match(fromFlag.stdout, /Syncing chat history to https:\/\/from-flag\.example\.com\/mcp\b/);
+        // Trailing slash normalized away, so the stored-credential key is stable.
+        assert.doesNotMatch(fromFlag.stdout, /mcp\/\n/);
+
+        assert.equal(collected.length, 2);
+        assert.equal(collected[0].id, 'chat:factory:abc');
+        assert.match(fromFlag.stdout, /Done — Ingested: 1, Failed: 0/);
+    });
+});
+
+test('sync-history --dry-run prints the estimate without authorizing or sending', async () => {
+    await withCli(async (run, _store, rootDir) => {
+        let sent = 0;
+        const syncTarget: IngestTarget = {
+            importRecords: async (records) => {
+                sent += records.length;
+                return { imported: records.length, failed: 0, errors: [] };
+            },
+        };
+
+        const result = await run(
+            ['sync-history', '--url', 'https://host.example.com/mcp', '--dry-run', '--source', rootDir],
+            { syncTarget, ingestManager: fakeIngestManager({ records: [] }) },
+        );
+
+        assert.equal(result.code, 0);
+        assert.match(result.stdout, /Estimated input tokens: ~1,000/);
+        assert.match(result.stdout, /Cost estimates/);
+        // No upload, and (via withCli's throwing default) no browser either.
+        assert.equal(sent, 0);
+    });
+});
+
+test('sync-history --logout forgets only the named host', async () => {
+    await withCli(async (run, _store, rootDir) => {
+        const kept = new SyncCredentialStore('https://other.example.com/mcp', { rootDir });
+        kept.writeTokens({ access_token: 'other-token', token_type: 'Bearer' });
+        const target = new SyncCredentialStore('https://host.example.com/mcp', { rootDir });
+        target.writeTokens({ access_token: 'host-token', token_type: 'Bearer' });
+        assert.equal(target.hasCredentials(), true);
+
+        const result = await run(['sync-history', '--url', 'https://host.example.com/mcp', '--logout']);
+
+        assert.equal(result.code, 0);
+        assert.match(result.stdout, /Forgot stored sync credentials for https:\/\/host\.example\.com\/mcp/);
+        assert.equal(target.hasCredentials(), false);
+        // Multi-host state is keyed per URL; logout must not sign you out everywhere.
+        assert.equal(kept.hasCredentials(), true);
+    });
+});
+
+test('stored sync credentials are written 0600 and never printed', async () => {
+    await withCli(async (run, _store, rootDir) => {
+        const credentials = new SyncCredentialStore('https://host.example.com/mcp', { rootDir });
+        credentials.writeTokens({ access_token: 'super-secret', refresh_token: 'refresh-me', token_type: 'Bearer' });
+
+        const mode = (await fs.stat(credentials.filePath)).mode & 0o777;
+        assert.equal(mode, 0o600);
+
+        const result = await run(
+            ['sync-history', '--url', 'https://host.example.com/mcp', '--dry-run', '--source', rootDir],
+            {
+                syncTarget: { importRecords: async () => ({ imported: 0, failed: 0, errors: [] }) },
+                ingestManager: fakeIngestManager({ records: [] }),
+            },
+        );
+        assert.doesNotMatch(`${result.stdout}${result.stderr}`, /super-secret|refresh-me/);
     });
 });

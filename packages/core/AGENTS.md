@@ -247,6 +247,60 @@ can explain what was found, but `pendingCount`, estimates, and
 selects only `buckets.newFiles`; there is no option that can re-enable changed
 sessions. Preserve this invariant across standard and Batch API paths.
 
+**The destination is an `IngestTarget`, not a `MemoryBackend`** (`ingest/types.ts`).
+`IngestTarget` is `Pick<MemoryBackend, 'importRecords'>` — the only method
+`run()`/`collect()` ever call on the destination. Narrowing it lets a *write-only*
+destination be a legal ingest target: `gemdex sync-history` pushes digests to a
+remote host over an OAuth-protected HTTP route and genuinely cannot recall, list,
+or delete (see `packages/mcp/src/sync-target.ts`). Every `MemoryBackend` still
+satisfies `IngestTarget` structurally, so existing callers are unaffected. Don't
+widen the parameter back to `MemoryBackend` for convenience — that would grant
+the sync path capabilities it deliberately lacks.
+
+Ids are deterministic (`chat:<source>:<sessionId>`) precisely so ingestion is
+**idempotent**: re-ingesting a session upserts the same row rather than
+duplicating it, which is what makes syncing the same history from several
+machines safe.
+
+### Two entry points: paths, and uploaded content
+
+`IngestManager` is **path-based** — it walks folders, stats files, and consults a
+ledger keyed by path + mtime. That is right for the machine that produced the
+sessions and wrong for a session that arrives as bytes over HTTP, which has no
+path, no mtime, and no ledger entry.
+
+So the parser is split by *input*, not by caller:
+
+- `parseSessionFile(path)` — reads the file, then delegates.
+- `parseJsonlSession(raw, {source, filePath, sessionId})` — the actual parse,
+  taking **text**. `readJsonlRecords` likewise takes raw text.
+- `detectJsonlSessionShape(raw)` — infers the agent from the records themselves
+  (codex `session_meta.payload.id`, factory `session_start.id`, claude
+  `user`/`assistant` + `sessionId`; otherwise `custom`). Path-based ingestion
+  knows the source from *which folder it scanned*; an upload does not, and the
+  filename is attacker-supplied, so the source has to come from the content.
+
+`ingest/uploaded-session.ts` (`ingestUploadedSessions`) is the upload-side
+counterpart to `IngestManager.run()`. It shares the cleaning, the digester, and
+the id derivation — that sharing is the point, since both paths must produce the
+same memory for the same session — and differs only where paths and uploads
+genuinely differ:
+
+- **No ledger.** Idempotence comes from the deterministic id alone; a re-upload
+  upserts. There is nothing meaningful to record about a file the host will
+  never see again.
+- **Per-file fault isolation, sequential.** Each file yields `ingested`,
+  `skipped` (`unparseable` | `trivial`), or `failed` and the batch continues.
+  One Gemini call per session is real money, so one bad transcript must not
+  discard the digests already produced.
+- **`UPLOADED_TRANSCRIPT_POINTER`.** A digest's footer normally points at the
+  transcript's path on disk. For an upload that path is meaningless on the host,
+  so `renderDigestMemory` takes an overridable `transcriptPointer` and the
+  attached transcript is named as the pointer instead.
+
+The remote caller is `POST /v1/sessions/ingest` on `gemdex-server`; see
+[`../web/AGENTS.md`](../web/AGENTS.md) §7 for why the digesting happens there.
+
 ## 8. Memory hygiene
 
 `hygiene/HygieneManager` finds stale/duplicate/contradicted memories in two

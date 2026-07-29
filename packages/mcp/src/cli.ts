@@ -7,6 +7,7 @@ import {
     hasTranscriptAttachment,
     IngestManager,
     IngestSourceFolder,
+    IngestTarget,
     MemoryBackend,
     MemoryExportRecord,
     RemoteMemoryBackend,
@@ -22,6 +23,9 @@ import { ClientConfigStore, StoredRemote, tokenEnvVarForRemote } from './cli-con
 import { createConfig } from './config.js';
 import { errorMessage } from './errors.js';
 import { createMemoryBackend } from './memory.js';
+import { authorizeSync } from './sync-auth.js';
+import { SyncCredentialStore } from './sync-config.js';
+import { RemoteSyncTarget } from './sync-target.js';
 
 interface CliIo {
     stdout: (message: string) => void;
@@ -38,6 +42,12 @@ interface CliDependencies {
     /** Backend for the active mode (local or remote), used by ingest-history. */
     createActiveBackend?: () => MemoryBackend;
     createIngestManager?: () => IngestManager;
+    /** Destination for `sync-history` (the OAuth-authenticated remote host). */
+    createSyncTarget?: (mcpUrl: string) => IngestTarget;
+    /** Overridable so tests never spawn a browser. */
+    openBrowser?: (url: string) => void | Promise<void>;
+    /** Overridable so tests can use a temp dir for stored OAuth state. */
+    createSyncCredentialStore?: (mcpUrl: string) => SyncCredentialStore;
 }
 
 const defaultIo: CliIo = {
@@ -62,6 +72,8 @@ Usage:
   gemdex backfill-transcripts [remote-name] [--force] [--dry-run]
   gemdex ingest-history [--source claude|factory|codex|antigravity|PATH]... [--model MODEL]
                         [--batch] [--dry-run] [--collect]
+  gemdex sync-history [--url https://host/mcp] [--source ...]... [--model MODEL]
+                      [--batch] [--dry-run] [--collect] [--logout]
 
 init-remote is the one-shot client setup for a BYOI server: it stores the
 remote + token, verifies the server is reachable, authenticated, and version-
@@ -86,6 +98,14 @@ never reprocessed, even if their transcript later changes. Defaults to detected
 presets. --dry-run prints the scan + cost estimate; --batch submits a Gemini
 Batch API job (50% cost, results within ~24h) that you collect later with
 --collect. Needs a local GEMINI_API_KEY.
+
+sync-history is ingest-history pointed at a REMOTE self-hosted host instead of
+this machine's pool: same scan/digest/ledger semantics, but each digest is
+upserted into the host's pool over its OAuth-protected /mcp endpoint. Run it on
+every coding machine — the host never reads your laptop's disk. The first run
+opens a browser once to authorize as the host's allowlisted Google account;
+the refresh token is then stored in ~/.gemdex/sync-auth.json (0600).
+--url (or GEMDEX_SYNC_URL) is the host's /mcp URL; --logout forgets it.
 `;
 }
 
@@ -456,6 +476,7 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
         'import-local-to-remote',
         'backfill-transcripts',
         'ingest-history',
+        'sync-history',
     ];
     if (!CLI_COMMANDS.includes(command)) return null;
 
@@ -609,6 +630,10 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
             return await runIngestHistory(args.slice(1), io, dependencies);
         }
 
+        if (command === 'sync-history') {
+            return await runSyncHistory(args.slice(1), io, store, dependencies);
+        }
+
         if (command === 'import-local-to-remote') {
             const attachTranscripts = args.includes('--attach-transcripts');
             const nameArg = args.slice(1).find((a) => !a.startsWith('--'));
@@ -694,7 +719,27 @@ function formatUsd(value: number): string {
     return `$${value.toFixed(2)}`;
 }
 
-async function runIngestHistory(args: string[], io: CliIo, dependencies: CliDependencies): Promise<number> {
+/**
+ * The shared scan → estimate → digest → upsert pipeline behind both
+ * `ingest-history` (local/BYOI backend) and `sync-history` (an
+ * OAuth-authenticated remote host). The two verbs differ *only* in the
+ * destination, so the destination is the parameter: digestion, cost estimates,
+ * the permanently-new-sessions-only ledger semantics, and the progress/summary
+ * output are identical by construction rather than by careful duplication.
+ */
+interface HistoryPipelineOptions {
+    /** Verb name, for the `--collect` hint line. */
+    verb: 'ingest-history' | 'sync-history';
+    /** Built lazily so `--dry-run` never authorizes or touches the network. */
+    createTarget: () => Promise<IngestTarget> | IngestTarget;
+}
+
+async function runHistoryPipeline(
+    args: string[],
+    io: CliIo,
+    dependencies: CliDependencies,
+    options: HistoryPipelineOptions,
+): Promise<number> {
     const model = optionValue(args, '--model') ?? DEFAULT_DIGEST_MODEL;
     if (!DIGEST_MODELS[model]) {
         throw new Error(`Unsupported model "${model}". Supported: ${Object.keys(DIGEST_MODELS).join(', ')}`);
@@ -703,6 +748,10 @@ async function runIngestHistory(args: string[], io: CliIo, dependencies: CliDepe
     const dryRun = args.includes('--dry-run');
     const collect = args.includes('--collect');
 
+    // Digests are generated client-side even when the destination is remote:
+    // the session files only exist on this machine, and shipping raw
+    // transcripts to the host to digest there would upload far more bytes and
+    // move the Gemini spend onto the host. See the sync-history docs.
     const apiKey = envManager.get('GEMINI_API_KEY');
     if (!apiKey) {
         throw new Error('Chat-history ingestion needs a local GEMINI_API_KEY (digests are generated client-side).');
@@ -711,10 +760,9 @@ async function runIngestHistory(args: string[], io: CliIo, dependencies: CliDepe
         apiKey,
         geminiBaseUrl: envManager.get('GEMINI_BASE_URL'),
     });
-    const createBackend = dependencies.createActiveBackend ?? (() => createMemoryBackend(createConfig()));
 
     if (collect) {
-        const result = await manager.collect(createBackend());
+        const result = await manager.collect(await options.createTarget());
         if (result.state === 'none') {
             io.stdout('No pending batch job.\n');
             return 0;
@@ -759,12 +807,12 @@ async function runIngestHistory(args: string[], io: CliIo, dependencies: CliDepe
     }
     if (dryRun) return 0;
 
-    const backend = createBackend();
+    const target = await options.createTarget();
     if (batch) {
-        const progress = await manager.run({ folders, model, mode: 'batch' }, backend);
+        const progress = await manager.run({ folders, model, mode: 'batch' }, target);
         const jobName = progress.pendingBatch?.jobName ?? '(unknown)';
         io.stdout(`Submitted batch job ${jobName} (${progress.total} sessions).\n`);
-        io.stdout('Collect results later with: gemdex ingest-history --collect\n');
+        io.stdout(`Collect results later with: gemdex ${options.verb} --collect\n`);
         return 0;
     }
 
@@ -773,7 +821,7 @@ async function runIngestHistory(args: string[], io: CliIo, dependencies: CliDepe
         io.stderr(`\r[ingest] ${progress.processed + progress.failed}/${progress.total} (failed: ${progress.failed})  `);
     }, 1000);
     try {
-        const progress = await manager.run({ folders, model, mode: 'standard' }, backend);
+        const progress = await manager.run({ folders, model, mode: 'standard' }, target);
         io.stderr('\n');
         io.stdout(
             `Done — Ingested: ${progress.processed}, Failed: ${progress.failed}, ` +
@@ -783,4 +831,98 @@ async function runIngestHistory(args: string[], io: CliIo, dependencies: CliDepe
     } finally {
         clearInterval(ticker);
     }
+}
+
+function runIngestHistory(args: string[], io: CliIo, dependencies: CliDependencies): Promise<number> {
+    return runHistoryPipeline(args, io, dependencies, {
+        verb: 'ingest-history',
+        createTarget: dependencies.createActiveBackend ?? (() => createMemoryBackend(createConfig())),
+    });
+}
+
+/**
+ * Resolve the host's `/mcp` endpoint for sync. Precedence mirrors the existing
+ * remote-mode convention (explicit flag → env → `~/.gemdex/.env`), and it is
+ * required: there is no sensible default host to guess at, and silently
+ * syncing to the wrong pool would be worse than failing.
+ */
+function resolveSyncUrl(args: string[], store: ClientConfigStore): string {
+    const raw = optionValue(args, '--url') ?? store.getEnv('GEMDEX_SYNC_URL');
+    if (!raw) {
+        throw new Error(
+            'No sync host configured. Pass --url https://your-host/mcp or set GEMDEX_SYNC_URL.',
+        );
+    }
+    const trimmed = raw.trim().replace(/\/+$/, '');
+    let parsed: URL;
+    try {
+        parsed = new URL(trimmed);
+    } catch {
+        throw new Error(`Sync URL "${raw}" is not a valid absolute URL.`);
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        throw new Error('Sync URL must use http or https.');
+    }
+    // The OAuth flow sends a bearer over this connection; plaintext off-box
+    // would expose it. Loopback is exempt so the reference stack can be
+    // smoke-tested against 127.0.0.1 without TLS.
+    const isLoopback = ['localhost', '127.0.0.1', '::1', '[::1]'].includes(parsed.hostname);
+    if (parsed.protocol === 'http:' && !isLoopback) {
+        throw new Error(
+            `Sync URL "${trimmed}" must use https for a non-loopback host — the OAuth token ` +
+            'would otherwise cross the network in the clear.',
+        );
+    }
+    return trimmed;
+}
+
+/** Open a URL in the user's default browser. Best-effort, per platform. */
+async function openInBrowser(url: string): Promise<void> {
+    const { spawn } = await import('node:child_process');
+    const command = process.platform === 'darwin'
+        ? 'open'
+        : process.platform === 'win32' ? 'start' : 'xdg-open';
+    spawn(command, [url], { stdio: 'ignore', detached: true, shell: process.platform === 'win32' })
+        .unref();
+}
+
+async function runSyncHistory(
+    args: string[],
+    io: CliIo,
+    store: ClientConfigStore,
+    dependencies: CliDependencies,
+): Promise<number> {
+    const mcpUrl = resolveSyncUrl(args, store);
+    const credentials = dependencies.createSyncCredentialStore?.(mcpUrl)
+        ?? new SyncCredentialStore(mcpUrl);
+
+    if (args.includes('--logout')) {
+        credentials.clear('all');
+        io.stdout(`Forgot stored sync credentials for ${mcpUrl}.\n`);
+        return 0;
+    }
+
+    // Progress and prompts go to stderr: stdout carries the machine-readable
+    // summary, and this same binary is an MCP server where stdout is the
+    // JSON-RPC channel.
+    const openBrowser = dependencies.openBrowser ?? openInBrowser;
+    const getAccessToken = async ({ forceRefresh }: { forceRefresh: boolean }): Promise<string> => {
+        if (forceRefresh) credentials.clear('tokens');
+        return authorizeSync({
+            mcpUrl,
+            store: credentials,
+            openBrowser,
+            log: (message) => io.stderr(message),
+        });
+    };
+
+    const createTarget = dependencies.createSyncTarget
+        ? () => dependencies.createSyncTarget!(mcpUrl)
+        : () => new RemoteSyncTarget({ mcpUrl, getAccessToken });
+
+    io.stdout(`Syncing chat history to ${mcpUrl}\n`);
+    if (!credentials.hasCredentials() && !args.includes('--dry-run')) {
+        io.stderr('No stored authorization for this host yet; a browser sign-in is needed once.\n');
+    }
+    return runHistoryPipeline(args, io, dependencies, { verb: 'sync-history', createTarget });
 }

@@ -125,6 +125,33 @@ even if the transcript later changes. This invariant is enforced by the core
 engine; there is no CLI or sidecar override. Digestion always needs a local
 `GEMINI_API_KEY`, including when memory storage is remote.
 
+### Syncing history to a self-hosted host
+
+`sync-history` is the same pipeline pointed at a **remote** Gemdex host, so every
+machine you code on feeds one searchable pool:
+
+```bash
+npx gemdex sync-history --url https://gemdex.example.com/mcp --dry-run
+npx gemdex sync-history --url https://gemdex.example.com/mcp
+```
+
+The first run opens a browser once to sign in as the host's allowlisted Google
+account; after that the stored refresh token is redeemed silently. Set
+`GEMDEX_SYNC_URL` to skip `--url`, and use `--logout` to forget a host's
+credentials (kept in `~/.gemdex/sync-auth.json`, `0600`).
+
+Notes:
+
+- Digests are built **on your machine** (your `GEMINI_API_KEY`) — only the digest
+  and the transcript are uploaded, never your whole session history unprocessed.
+- Session ids are deterministic, so syncing the same history twice updates in
+  place instead of creating duplicates. Safe to re-run, and safe to run from
+  several machines.
+- `https` is required for anything but a loopback host: the request carries an
+  access token.
+- This is a **write-only** capability. It can add or update chat digests on the
+  host and nothing else.
+
 ## Desktop sidecar
 
 The same binary also runs the localhost HTTP manager API used by the desktop app:
@@ -143,6 +170,7 @@ npx gemdex serve --port 0   # 127.0.0.1 only; --port 0 = OS picks a free port
 | `GEMDEX_REMOTE_URL` | Required in remote mode; Gemdex Server root URL |
 | `GEMDEX_REMOTE_TOKEN` | Required in remote mode by default; server bearer token |
 | `GEMDEX_REMOTE_TOKEN_ENV_VAR` | Optional alternate env var containing the remote token |
+| `GEMDEX_SYNC_URL` | *(optional)* Default host `/mcp` endpoint for `sync-history` |
 | `GEMDEX_REMOTE_NAME` | Optional human-readable remote name |
 
 See the [main repo](https://github.com/anand-92/gemdex) for all environment

@@ -19,6 +19,11 @@ import {
     migrateDatabase,
     PostgresMemoryBackend,
 } from './postgres.js';
+import {
+    handleSessionIngestRequest,
+    SESSION_INGEST_PATH,
+    type SessionIngestOptions,
+} from './session-ingest.js';
 
 // Read the version from package.json so it never drifts from the published
 // version. createRequire works in ESM and resolves relative to this module
@@ -43,6 +48,10 @@ const VERSION_INFO: ServerVersionInfo = {
         attachments: true,
         recallAttachments: true,
         importExport: true,
+        // Host-side clean+digest of uploaded chat sessions
+        // (POST /v1/sessions/ingest). Advertised so the web manager can hide
+        // its upload view against an older server rather than surfacing a 404.
+        sessionIngest: true,
         auth: ['bearer'],
     },
 };
@@ -55,6 +64,14 @@ export interface CreateServerOptions {
     unsafeDevNoAuth?: boolean;
     /** Browser origins allowed to read data-route responses. Empty means browser cross-origin access is denied. */
     allowedOrigins?: string[];
+    /**
+     * Gemini settings the session-ingest route needs to digest uploaded
+     * transcripts. Absent means that one route answers 503 while the rest of
+     * `/v1` is unaffected.
+     */
+    sessionIngest?: Pick<ServerConfig, 'geminiApiKey' | 'geminiBaseUrl'>;
+    /** Injectable digester factory so route tests never call Gemini. */
+    createSessionDigester?: SessionIngestOptions['createDigester'];
 }
 
 export interface ConfiguredStoreDependencies {
@@ -107,7 +124,14 @@ function hasValidBearerToken(req: http.IncomingMessage, token: string | undefine
  * Build the HTTP server. Health and version routes are always available.
  * Memory routes under /v1/* answer 503 until a store is injected.
  */
-export function createServer({ store = null, token, unsafeDevNoAuth = false, allowedOrigins = [] }: CreateServerOptions): http.Server {
+export function createServer({
+    store = null,
+    token,
+    unsafeDevNoAuth = false,
+    allowedOrigins = [],
+    sessionIngest = {},
+    createSessionDigester,
+}: CreateServerOptions): http.Server {
     const normalizedAllowedOrigins = normalizeOrigins(allowedOrigins);
     return http.createServer(async (req, res) => {
         const method = req.method ?? 'GET';
@@ -157,6 +181,22 @@ export function createServer({ store = null, token, unsafeDevNoAuth = false, all
                     sendJson(res, 503, { error: 'No memory backend configured' }, corsHeaders);
                     return;
                 }
+
+                // Session ingest is handled here, not by core's shared router:
+                // it is the one /v1 route that does Gemini digestion rather
+                // than pure storage, and the sidecar that mounts that router
+                // has its own folder-scanning ingest routes instead. Matched
+                // before the prefix strip so it cannot collide with a memory id.
+                if (pathname === SESSION_INGEST_PATH) {
+                    await handleSessionIngestRequest(req, res, {
+                        store,
+                        config: sessionIngest,
+                        corsHeaders,
+                        ...(createSessionDigester && { createDigester: createSessionDigester }),
+                    });
+                    return;
+                }
+
                 // Strip the /v1 prefix and delegate to the shared memory API
                 // handler. Mutate req.url in place (idiomatic mount-path
                 // stripping) rather than wrapping req in a prototype proxy —
@@ -236,6 +276,10 @@ export async function startServer(
             token: config.token,
             unsafeDevNoAuth: config.unsafeDevNoAuth,
             allowedOrigins: config.allowedOrigins,
+            sessionIngest: {
+                ...(config.geminiApiKey !== undefined && { geminiApiKey: config.geminiApiKey }),
+                ...(config.geminiBaseUrl !== undefined && { geminiBaseUrl: config.geminiBaseUrl }),
+            },
         });
         server.listen(config.port, config.host, () => {
             const address = server.address();

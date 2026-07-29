@@ -150,7 +150,11 @@ function section(heading: string, items: string[], ordered: boolean): string {
  * footed with the provenance pointer back to the raw transcript so an agent
  * can read the verbatim session when the digest isn't enough.
  */
-export function renderDigestMemory(digest: SessionDigest, meta: SessionMeta): string {
+export function renderDigestMemory(
+    digest: SessionDigest,
+    meta: SessionMeta,
+    options: { transcriptPointer?: string } = {},
+): string {
     const sourceLabel = SOURCE_LABELS[meta.source] ?? SOURCE_LABELS.custom;
     const headerParts = [`Source: ${sourceLabel}`];
     if (meta.cwd) {
@@ -164,7 +168,12 @@ export function renderDigestMemory(digest: SessionDigest, meta: SessionMeta): st
     body += section('Tools & services', digest.toolsAndServices, false);
     body += section('Credentials & config', digest.credentialsAndConfig, false);
     body += section('Gotchas', digest.gotchas, false);
-    body += `\n---\nFull transcript: ${meta.filePath}\n(read this file for the verbatim session)`;
+    // Provenance footer. The path-based pipeline points at the source file on
+    // the machine that ingested it; an uploaded session has no such path on the
+    // ingesting host, so callers override the pointer with something an agent
+    // can actually act on (the read_attachment hint).
+    body += `\n---\nFull transcript: ${options.transcriptPointer ?? meta.filePath}\n`
+        + '(read this file for the verbatim session)';
     return body;
 }
 

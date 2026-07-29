@@ -18,7 +18,10 @@ build/test/lint/style rules are repo-wide — see the root `AGENTS.md`.
 | `src/index.ts` | The single entry point + `bin`. Reroutes console→stderr, decides which of the three modes to run, defines the five MCP tool **schemas/descriptions**, constructs the `MemoryStatsStore`, runs the stdio server. |
 | `src/serve.ts` | `gemdex serve` localhost HTTP sidecar: bind/token/origin auth + sidecar-only `/config` & `/settings*` routes; delegates data routes to core. |
 | `src/handlers.ts` | MCP tool **logic** (`save_memory`/`recall`/`update_memory`/`list_memories`/`report_outcome`/`read_attachment`): arg validation, attachment resolution, result formatting, recall stats bump + track-record rendering + opt-in trust re-ranking, save-time similar-memory advisory rendering, transcript/blob text fetch. Never throws to the protocol. |
-| `src/cli.ts` | CLI verbs (`init-remote`, `remote …`, `mode …`, `status`, `import-local-to-remote`). |
+| `src/cli.ts` | CLI verbs (`init-remote`, `remote …`, `mode …`, `status`, `import-local-to-remote`, `ingest-history`, `sync-history`). `runHistoryPipeline` is the shared scan→digest→upsert body behind the last two. |
+| `src/sync-target.ts` | `RemoteSyncTarget` — an `IngestTarget` that POSTs digests to a remote host's `/mcp/sync/records` in batches of 25, refreshing the token exactly once on a 401. Write-only: it cannot recall or delete. |
+| `src/sync-auth.ts` | The OAuth client for `sync-history`: `LoopbackReceiver` (RFC 8252 §7.3 loopback redirect) + `SyncOAuthClientProvider` + `authorizeSync()`, which drives the MCP SDK's `auth()` (DCR → PKCE → refresh) and only opens a browser when the SDK says `'REDIRECT'`. |
+| `src/sync-config.ts` | `SyncCredentialStore` — per-host OAuth state in `~/.gemdex/sync-auth.json` (`0600`, dir `0700`): client registration, tokens, discovery. Keyed by MCP URL so `--logout` is scoped to one host. |
 | `src/config.ts` | `createConfig()` — turns env into a `GemdexConfig`; `resolveMode` picks local vs remote. Also `--help`. |
 | `src/memory.ts` | `createMemoryBackend(config)` — the one place that picks `LocalMemoryBackend` vs `RemoteMemoryBackend`. |
 | `src/cli-config.ts` | `ClientConfigStore` — reads/writes `~/.gemdex/config.json` (named remotes) and `~/.gemdex/.env` (tokens, `0600`). |
@@ -202,10 +205,69 @@ independent pools; the local and remote pools never merge.
   server is reachable **and version-compatible** (`checkServerCompatibility`) →
   confirm the token authenticates (`.list()`) → optional import → activate.
 
+## `sync-history`: laptop digests → a remote host
+
+`gemdex sync-history` is `ingest-history` pointed at **someone else's pool**: the
+same scan/digest/ledger pipeline, but each digest is upserted into a self-hosted
+host over its OAuth-protected `/mcp` surface. The point is many coding machines,
+one searchable pool — the host never reads a laptop's disk.
+
+```
+laptop: scan ~/.claude … → digest via Gemini (local key) → RemoteSyncTarget
+                                                             │ POST /mcp/sync/records
+                                                             │ Bearer <OAuth access token>
+                                              host: mcp-http → BYOI /v1/import (upsert by id)
+```
+
+**Digests are generated client-side even though the destination is remote.** The
+session files only exist on the laptop; digesting on the host would mean
+uploading every raw transcript and moving the Gemini spend onto the host. So
+`sync-history` needs a local `GEMINI_API_KEY` — unlike remote *mode*, which needs
+none.
+
+**Why a custom route and not an MCP tool.** The ticket's preferred shape was
+"zero new server surface — just call the existing tools," and that is not
+possible: `save_memory` mints a **random** id (`MemoryStore.newId()`) and
+`update_memory` requires the id to already exist. Sync needs *upsert on a
+deterministic id* (`chat:<source>:<sessionId>`, so re-syncing a session updates
+in place instead of duplicating) while preserving `createdAt`. Only `/v1/import`
+does that, and it is deliberately absent from the six-tool agent surface. Hence
+the documented fallback: one auth-guarded ingest route, authenticated with the
+**standard MCP OAuth flow** rather than a static bearer, so no long-lived
+full-access secret is ever copied onto a laptop.
+
+**Auth is the SDK's, not ours.** `authorizeSync()` hands the MCP SDK's `auth()`
+an `OAuthClientProvider`; the SDK owns discovery, dynamic client registration,
+PKCE, and refresh. We supply only storage (`SyncCredentialStore`) and the
+loopback redirect. Consequences worth knowing:
+
+- **The browser opens only on first authorization.** A stored refresh token is
+  redeemed silently; `auth()` returns `'AUTHORIZED'` without any redirect.
+- **The loopback receiver is single-use and state-matched** — it binds
+  `127.0.0.1:0` (kernel-assigned port), rejects a mismatched `state`, times out
+  after 5 minutes, and is always closed in a `finally`.
+- **Tokens live in `~/.gemdex/sync-auth.json` (`0600`), keyed by MCP URL.** The
+  refresh token is the sensitive part; treat it like the BYOI bearer and never
+  print it. `--logout` clears one host, not all of them.
+- **A 401 triggers exactly one refresh, then fails.** `RemoteSyncTarget` retries
+  the batch once with a force-refreshed token; a second 401 surfaces as a failed
+  record. Never loop — a revoked allowlist entry must be visible, not retried
+  forever.
+
 ## Gotchas / invariants
 
 - **Never write to stdout in MCP mode** (it's the JSON-RPC channel). The sidecar's
   `PORT=… TOKEN=…` handshake is the *only* sanctioned raw-stdout write.
+- **`sync-history` needs a local Gemini key; remote *mode* does not.** Digestion
+  is client-side (see above). The two "remote" concepts are unrelated:
+  `GEMDEX_MODE=remote` swaps this process's backend, while `sync-history` pushes
+  to a host over OAuth and leaves the active mode alone.
+- **`sync-history` refuses plaintext `http` off-loopback.** The access token
+  would otherwise cross the network in the clear. Loopback is exempt so the
+  reference stack can be smoke-tested without TLS.
+- **`RemoteSyncTarget` is an `IngestTarget`, not a `MemoryBackend`** — deliberately
+  write-only, so the sync path cannot read or delete the host's memories. Don't
+  "simplify" it by widening it to `MemoryBackend`.
 - **MCP local mode fails fast on a missing key; the sidecar boots into a repairable gate.** The stdio server builds the backend at startup, so `createEmbeddingInstance` throws `GEMINI_API_KEY is required` and the process exits non-zero. The sidecar starts its management routes, validates a saved key asynchronously, and serves `503 {needsKey:true}` for local data work until readiness is `valid`.
 - **History ingestion is permanently new-sessions-only.** The core manager runs only ledger-new files. Changed previously ingested sessions may appear in scan diagnostics but are never passed to standard or batch digestion; the sidecar ignores legacy `newOnly` request fields and the CLI exposes no override.
 - **Tool routing is positional**: `index.ts` switches on `MCP_TOOL_NAMES[0..4]`.

@@ -5,8 +5,25 @@
  * been ingested.
  */
 
+import type { ImportRecordsResult, MemoryExportRecord } from '../memory/types';
+
 /** Where a session file came from. Drives the deterministic memory id prefix. */
 export type IngestSource = 'claude' | 'factory' | 'codex' | 'antigravity' | 'custom';
+
+/**
+ * What ingestion needs from a destination: upsert-by-id of digest records.
+ *
+ * Deliberately narrower than `MemoryBackend`. Ingestion only ever calls
+ * `importRecords`, because the deterministic `chat:<source>:<sessionId>` id is
+ * the whole point — `save` would mint a fresh UUID and duplicate the session on
+ * every run. Narrowing the parameter lets a destination that is *not* a full
+ * backend (e.g. the OAuth-authenticated sync client in `gemdex-mcp`, which can
+ * upsert but cannot recall or delete) be an ingestion target, while every
+ * `MemoryBackend` still satisfies it structurally.
+ */
+export interface IngestTarget {
+    importRecords(records: MemoryExportRecord[]): Promise<ImportRecordsResult>;
+}
 
 /** A folder to scan for session transcripts. */
 export interface IngestSourceFolder {
