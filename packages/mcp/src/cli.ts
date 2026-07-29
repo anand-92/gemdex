@@ -308,22 +308,48 @@ async function backfillTranscripts(
     io: CliIo,
     options: { force?: boolean; dryRun?: boolean } = {},
 ): Promise<BackfillTranscriptsResult> {
-    const records = await backend.exportAll();
+    // Never use exportAll() here — remote export embeds every transcript as
+    // base64 and multi-hundred-MB pools blow V8 string limits ("Invalid string
+    // length"). List summaries + per-id get() only returns metadata + content.
+    const summaries = await backend.list();
+    const candidates = summaries.filter((summary) => summary.id.startsWith('chat:'));
     const result: BackfillTranscriptsResult = {
         attached: 0, already: 0, missing: 0, noPath: 0, failed: 0,
     };
-    for (const record of records) {
-        // Only touch digests / records that look like they should have a transcript.
-        const looksLikeDigest = record.id.startsWith('chat:')
-            || record.content.includes('Full transcript:');
-        if (!looksLikeDigest) continue;
+    let index = 0;
+    for (const summary of candidates) {
+        index += 1;
+        let memory;
+        try {
+            memory = await backend.get(summary.id);
+        } catch (error) {
+            result.failed += 1;
+            io.stderr(`Failed ${summary.id}: ${errorMessage(error)}\n`);
+            continue;
+        }
+        if (!memory) {
+            result.failed += 1;
+            io.stderr(`Failed ${summary.id}: not found\n`);
+            continue;
+        }
 
-        if (!options.force && hasTranscriptAttachment(record.attachments)) {
+        if (!options.force && hasTranscriptAttachment(memory.attachments)) {
             result.already += 1;
             continue;
         }
 
-        const attached = attachTranscriptToRecord(record, { force: options.force === true });
+        // Build a metadata-only export record (no attachment bytes). Cleaned
+        // transcript is read from the local path footed in content.
+        const attached = attachTranscriptToRecord(
+            {
+                id: memory.id,
+                title: memory.title,
+                content: memory.content,
+                createdAt: memory.createdAt,
+                updatedAt: memory.updatedAt,
+            },
+            { force: options.force === true },
+        );
         if (attached.status === 'already') {
             result.already += 1;
             continue;
@@ -335,7 +361,7 @@ async function backfillTranscripts(
         if (attached.status === 'missing') {
             result.missing += 1;
             io.stderr(
-                `Missing transcript for ${record.id}` +
+                `Missing transcript for ${memory.id}` +
                 (attached.filePath ? `: ${attached.filePath}` : '') + `\n`,
             );
             continue;
@@ -343,7 +369,7 @@ async function backfillTranscripts(
 
         if (options.dryRun) {
             result.attached += 1;
-            io.stdout(`[dry-run] would attach transcript to ${record.id}\n`);
+            io.stdout(`[dry-run] would attach transcript to ${memory.id}\n`);
             continue;
         }
 
@@ -354,11 +380,19 @@ async function backfillTranscripts(
             } else {
                 result.failed += 1;
                 const detail = imported.errors[0]?.error;
-                io.stderr(`Failed ${record.id}${detail ? `: ${detail}` : ''}\n`);
+                io.stderr(`Failed ${memory.id}${detail ? `: ${detail}` : ''}\n`);
             }
         } catch (error) {
             result.failed += 1;
-            io.stderr(`Failed ${record.id}: ${errorMessage(error)}\n`);
+            io.stderr(`Failed ${memory.id}: ${errorMessage(error)}\n`);
+        }
+
+        if (index % 25 === 0 || index === candidates.length) {
+            io.stdout(
+                `Progress ${index}/${candidates.length} — ` +
+                `attached ${result.attached}, already ${result.already}, ` +
+                `missing ${result.missing}, noPath ${result.noPath}, failed ${result.failed}\n`,
+            );
         }
     }
     return result;
