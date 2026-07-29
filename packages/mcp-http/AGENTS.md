@@ -35,7 +35,7 @@ the stats ledger — is **re-implemented here and must be kept in sync by hand**
 | `stats.py` | `MemoryStatsStore` — the `~/.gemdex/stats.json` outcome ledger, same file/format as core's TS store. |
 | `tools.py` | `GemdexTools` — the six wrappers: validate args → call BYOI → render. Mirrors `handlers.ts`. |
 | `descriptions.py` | Tool descriptions copied from TS `index.ts`, with the attachment-path caveat swapped in. |
-| `auth.py` | `build_auth_provider()` — **the single auth seam.** |
+| `auth.py` | `build_auth_provider()` — **the single auth seam.** Static bearer, or `SingleUserGoogleProvider` (OAuth 2.1 + email allowlist). |
 | `server.py` | `build_server()` + `main()`. Registers tools, runs `mcp.run(transport="http", …)`. |
 
 ## Three invariants that are easy to break
@@ -65,14 +65,37 @@ attempting a host read, and every description says inline base64 only. Do not
 ### 3. Auth lives in `auth.py` and nowhere else
 
 `build_auth_provider(config) -> AuthProvider | None` is the whole auth surface.
-Today: `StaticTokenVerifier` over one configured bearer, loopback bind. GEM2-3
-replaces that function body with an OAuth 2.1 Resource Server provider. Nothing
-in `server.py` or `tools.py` may branch on the auth mode — if you find yourself
-adding `if config.unsafe_no_auth` outside `auth.py`/`main()`, the seam is leaking.
+Two modes — `static` (one bearer, loopback dev) and `google` (OAuth 2.1 resource
+server). Nothing in `server.py` or `tools.py` may branch on the auth mode; if you
+find yourself adding `if config.auth_mode` outside `auth.py`/`main()`, the seam is
+leaking.
 
 `None` is only reachable via `GEMDEX_MCP_HTTP_UNSAFE_NO_AUTH=true`; the config
 layer refuses to boot an authless server otherwise, so the seam can't be
 bypassed by simply omitting a token.
+
+**`google` mode is a single-user allowlist, and that is the security boundary.**
+Google authenticates *every* Google account, so `GoogleProvider` on its own is an
+open door — `SingleUserGoogleProvider.verify_token` is what closes it. Three
+things about it are load-bearing, and the mistake in each direction fails *open*:
+
+1. **The check belongs in `verify_token`, not the OAuth flow.** Clients present a
+   FastMCP-issued JWT that `OAuthProxy` swaps for the stored Google token on every
+   call, so `verify_token` is the one choke point every authenticated request
+   crosses. Filtering at authorization time instead would let an
+   already-issued token outlive its removal from the allowlist.
+2. **`email_verified` must be true.** An unverified Google email is
+   self-asserted, so accepting it would let anyone claim the allowlisted address.
+3. **`config.py` drops `client_token` in google mode.** Otherwise a leftover
+   `GEMDEX_MCP_HTTP_TOKEN` stays valid as a second credential that never consults
+   the allowlist.
+
+Both (1) and (2) depend on FastMCP internals — that `OAuthProxy.verify_token` is
+the single entry point and that Google's `email` claim survives the token swap
+into `AccessToken.claims`. **FastMCP's auth module is exempt from semver**, so
+re-run `tests/test_auth_oauth.py` on every upgrade and treat a failure as a
+security regression. Those tests were mutation-checked: neutering either the
+email comparison or the `email_verified` guard makes them fail.
 
 ## Other gotchas
 
@@ -91,6 +114,10 @@ bypassed by simply omitting a token.
   read once at startup into `Config`). Off: fetch exactly `limit`, backend order
   untouched, no `trust=` in the score line — byte-identical to the flag-off TS
   path.
+- **The Google OAuth client cannot be created from a CLI** — don't spend time
+  trying. `gcloud iam oauth-clients` is Workforce Identity Federation (wrong
+  system), the `gcloud alpha iap oauth-brands` API was shut down 2026-03-19, and
+  the Firebase CLI has no OAuth-client verbs. Console only; see the README.
 - **`scripts/smoke.py` writes a real memory** into the live BYOI pool (titled
   `gemdex-mcp-http smoke …`). It is an end-to-end acceptance check, not a dry
   run; `uv run pytest` is the offline suite and mocks the BYOI entirely.

@@ -97,6 +97,14 @@ def main() -> int:
             "(GEMDEX_MCP_HTTP_UNSAFE_NO_AUTH=true). Loopback development only.",
             file=sys.stderr,
         )
+    elif config.auth_mode == "google":
+        print(
+            f"gemdex-mcp-http: auth=google (OAuth 2.1), single user {config.allowed_email}, "
+            f"issuer {config.public_base_url}",
+            file=sys.stderr,
+        )
+    else:
+        print("gemdex-mcp-http: auth=static bearer", file=sys.stderr)
     print(f"gemdex-mcp-http: BYOI {config.byoi_url}/v1 → MCP {config.endpoint}", file=sys.stderr)
 
     mcp = build_server(config)

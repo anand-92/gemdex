@@ -21,6 +21,11 @@ from gemdex_mcp_http.stats import MemoryStatsStore
 from gemdex_mcp_http.tools import GemdexTools
 
 
+#: The single account google mode admits in tests. Mirrors the real deployment's
+#: GEMDEX_ALLOWED_EMAIL so the allowlist tests read like production.
+ALLOWED_EMAIL = "nik.anand.1998@gmail.com"
+
+
 def make_memory(**overrides: Any) -> dict[str, Any]:
     memory = {
         "id": "mem-1",
@@ -93,9 +98,28 @@ def make_config(**overrides: Any) -> Config:
         "client_token": "client-token",
         "unsafe_no_auth": False,
         "trust_ranking": False,
+        "auth_mode": "static",
+        "google_client_id": None,
+        "google_client_secret": None,
+        "public_base_url": None,
+        "allowed_email": None,
     }
     defaults.update(overrides)
     return Config(**defaults)
+
+
+def make_google_config(**overrides: Any) -> Config:
+    """A config in google mode, with plausible-shaped Google credentials."""
+    defaults: dict[str, Any] = {
+        "auth_mode": "google",
+        "client_token": None,
+        "google_client_id": "123456.apps.googleusercontent.com",
+        "google_client_secret": "GOCSPX-test-secret",
+        "public_base_url": "https://mcp.example.com",
+        "allowed_email": ALLOWED_EMAIL,
+    }
+    defaults.update(overrides)
+    return make_config(**defaults)
 
 
 @pytest.fixture
