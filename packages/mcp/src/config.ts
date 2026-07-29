@@ -98,6 +98,12 @@ Usage:
                                    --dry-run shows the scan + cost estimate;
                                    --batch uses the Gemini Batch API (50%
                                    cost), collected later via --collect.
+  npx gemdex sync-history [--url https://host/mcp] [--source ...]...
+                                   Same as ingest-history, but upserts each
+                                   digest into a REMOTE self-hosted host's pool
+                                   over its OAuth-protected /mcp endpoint. Run
+                                   on every coding machine; authorizes once in
+                                   a browser. --logout forgets the credentials.
 
 Optional:
   GEMDEX_MODE             local (default) or remote.
@@ -115,6 +121,8 @@ Optional:
   GEMDEX_REMOTE_TOKEN_ENV_VAR
                           Alternate env var containing the remote bearer token.
   GEMDEX_REMOTE_NAME      Optional human-readable remote name.
+  GEMDEX_SYNC_URL         Host /mcp endpoint used by 'gemdex sync-history'
+                          (https required off-loopback).
   GEMDEX_SERVE_PORT       Default port for 'gemdex serve' (default: auto/0).
         `);
 }

@@ -247,6 +247,21 @@ can explain what was found, but `pendingCount`, estimates, and
 selects only `buckets.newFiles`; there is no option that can re-enable changed
 sessions. Preserve this invariant across standard and Batch API paths.
 
+**The destination is an `IngestTarget`, not a `MemoryBackend`** (`ingest/types.ts`).
+`IngestTarget` is `Pick<MemoryBackend, 'importRecords'>` — the only method
+`run()`/`collect()` ever call on the destination. Narrowing it lets a *write-only*
+destination be a legal ingest target: `gemdex sync-history` pushes digests to a
+remote host over an OAuth-protected HTTP route and genuinely cannot recall, list,
+or delete (see `packages/mcp/src/sync-target.ts`). Every `MemoryBackend` still
+satisfies `IngestTarget` structurally, so existing callers are unaffected. Don't
+widen the parameter back to `MemoryBackend` for convenience — that would grant
+the sync path capabilities it deliberately lacks.
+
+Ids are deterministic (`chat:<source>:<sessionId>`) precisely so ingestion is
+**idempotent**: re-ingesting a session upserts the same row rather than
+duplicating it, which is what makes syncing the same history from several
+machines safe.
+
 ## 8. Memory hygiene
 
 `hygiene/HygieneManager` finds stale/duplicate/contradicted memories in two

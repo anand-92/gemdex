@@ -13,7 +13,7 @@ from typing import AsyncIterator
 
 from fastmcp import FastMCP
 from starlette.requests import Request
-from starlette.responses import PlainTextResponse
+from starlette.responses import JSONResponse, PlainTextResponse
 
 from .auth import build_auth_provider
 from .byoi import ByoiClient
@@ -27,6 +27,7 @@ from .descriptions import (
     UPDATE_MEMORY,
 )
 from .stats import MemoryStatsStore
+from .sync import SYNC_RECORDS_PATH, handle_sync_records
 from .tools import GemdexTools
 
 SERVER_NAME = "gemdex"
@@ -72,10 +73,11 @@ def build_server(config: Config, client: ByoiClient | None = None) -> FastMCP:
             if owns_client:
                 await byoi.aclose()
 
+    auth = build_auth_provider(config)
     mcp = FastMCP(
         name=SERVER_NAME,
         instructions=INSTRUCTIONS.strip(),
-        auth=build_auth_provider(config),
+        auth=auth,
         lifespan=lifespan,
     )
 
@@ -96,6 +98,17 @@ def build_server(config: Config, client: ByoiClient | None = None) -> FastMCP:
         a failure that belongs to a different service's healthcheck.
         """
         return PlainTextResponse("ok")
+
+    @mcp.custom_route(SYNC_RECORDS_PATH, methods=["POST"])
+    async def sync_records(request: Request) -> JSONResponse:
+        """Upsert chat-history digests by deterministic id (`gemdex sync-history`).
+
+        Not a tool — agents never see it (see `sync.py` for why upsert-by-id
+        cannot be a tool). Unlike `/healthz` this route enforces auth itself,
+        because FastMCP exempts custom routes from its auth middleware and this
+        one writes to the memory pool.
+        """
+        return await handle_sync_records(request, byoi, auth)
 
     return mcp
 

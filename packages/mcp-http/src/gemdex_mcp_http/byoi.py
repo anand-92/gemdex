@@ -77,6 +77,26 @@ class ByoiClient:
         body = await self._request("GET", "/v1/memories")
         return self._require_field(body, "memories", "/v1/memories")
 
+    async def import_records(self, records: list[dict[str, Any]]) -> dict[str, Any]:
+        """Upsert portable records by id — the only write that preserves an id.
+
+        `save` mints a fresh server-side UUID, which would duplicate a chat
+        session on every sync run; `/v1/import` upserts on the deterministic
+        `chat:<source>:<sessionId>` id instead. This backs the sync-history
+        route and has no tool wrapper: it is not part of the six-tool surface.
+        """
+        body = await self._request("POST", "/v1/import", json={"records": records})
+        assert body is not None  # _request only returns None for allowed 404s
+        imported = body.get("imported")
+        if not isinstance(imported, int):
+            raise ByoiError("Invalid response from Gemdex Server for /v1/import: missing 'imported' field.")
+        return {
+            "imported": imported,
+            # Servers pre-dating per-record import errors return only { imported }.
+            "failed": body["failed"] if isinstance(body.get("failed"), int) else 0,
+            "errors": body["errors"] if isinstance(body.get("errors"), list) else [],
+        }
+
     async def read_attachment(self, memory_id: str, attachment_id: str) -> tuple[bytes, str] | None:
         """Raw attachment bytes plus their mime type, or `None` when absent."""
         path = f"/v1/memories/{_quote(memory_id)}/attachments/{_quote(attachment_id)}"

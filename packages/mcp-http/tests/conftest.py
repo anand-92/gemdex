@@ -8,9 +8,11 @@ calls and rendering the response.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
+import httpx2
 import pytest
 from fastmcp import Client
 
@@ -50,6 +52,7 @@ class FakeByoi:
         self.get_result: dict[str, Any] | None = make_memory()
         self.list_result: list[dict[str, Any]] = []
         self.attachment: tuple[bytes, str] | None = None
+        self.import_result: dict[str, Any] = {"imported": 0, "failed": 0, "errors": []}
         self.raise_on: str | None = None
 
     def _record(self, name: str, payload: Any) -> None:
@@ -76,6 +79,10 @@ class FakeByoi:
     async def list(self) -> list[dict[str, Any]]:
         self._record("list", None)
         return self.list_result
+
+    async def import_records(self, records: list[dict[str, Any]]) -> dict[str, Any]:
+        self._record("import_records", records)
+        return {**self.import_result, "imported": self.import_result["imported"] or len(records)}
 
     async def read_attachment(self, memory_id: str, attachment_id: str) -> tuple[bytes, str] | None:
         self._record("read_attachment", (memory_id, attachment_id))
@@ -146,3 +153,18 @@ def trust_tools(byoi: FakeByoi, stats: MemoryStatsStore) -> GemdexTools:
 def client(byoi: FakeByoi) -> Client:
     """An in-memory MCP client against the real server, with the BYOI faked."""
     return Client(build_server(make_config(unsafe_no_auth=True, client_token=None), client=byoi))
+
+
+@asynccontextmanager
+async def http_client(config: Config, byoi: FakeByoi) -> AsyncIterator[httpx2.AsyncClient]:
+    """An HTTP client over the server's real ASGI app, for the custom routes.
+
+    `Client(server)` speaks MCP in-memory and so never exercises Starlette
+    routing or the auth enforcement the sync route does itself. These tests must
+    go through the ASGI app to be meaningful.
+    """
+    app = build_server(config, client=byoi).http_app()
+    async with httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=app), base_url="http://gemdex.test"
+    ) as client:
+        yield client

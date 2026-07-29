@@ -2,7 +2,6 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { MemoryBackend } from '../memory/backend';
 import type { MemoryExportRecord } from '../memory/types';
 import {
     SessionDigester,
@@ -29,6 +28,7 @@ import {
     IngestScanResult,
     IngestScanTotals,
     IngestSourceFolder,
+    IngestTarget,
     ParsedSession,
     PendingBatchJob,
     PendingBatchRequest,
@@ -91,7 +91,7 @@ export interface CollectResult {
 /**
  * Orchestrates chat-history ingestion: scan source folders against the
  * ledger, digest each pending session via Gemini (standard or Batch API),
- * and upsert one memory per session into the active MemoryBackend with the
+ * and upsert one memory per session into the destination IngestTarget with the
  * deterministic id `chat:<source>:<sessionId>`.
  *
  * One run at a time; progress is polled via {@link getProgress}.
@@ -203,7 +203,7 @@ export class IngestManager {
      * Run ingestion over the pending files in `folders`. Resolves when the
      * run completes (standard) or the batch job has been submitted (batch).
      */
-    async run(options: IngestRunOptions, backend: MemoryBackend): Promise<IngestProgress> {
+    async run(options: IngestRunOptions, backend: IngestTarget): Promise<IngestProgress> {
         if (this.running) throw new Error('An ingestion run is already in progress.');
         if (this.ledger.getPendingBatch()) {
             throw new Error('A batch ingestion job is pending. Collect or cancel it first.');
@@ -265,7 +265,7 @@ export class IngestManager {
      * save the digests. Safe to call repeatedly; returns `pending` until the
      * job reaches a terminal state.
      */
-    async collect(backend: MemoryBackend): Promise<CollectResult> {
+    async collect(backend: IngestTarget): Promise<CollectResult> {
         const pending = this.ledger.getPendingBatch();
         if (!pending) return { state: 'none' };
 
@@ -376,7 +376,7 @@ export class IngestManager {
     private async runStandard(
         sessions: PendingSession[],
         model: string | undefined,
-        backend: MemoryBackend,
+        backend: IngestTarget,
     ): Promise<void> {
         const digester = this.createDigester(model);
         const queue = [...sessions];
@@ -433,7 +433,7 @@ export class IngestManager {
     private async saveDigest(
         digest: SessionDigest,
         request: PendingBatchRequest,
-        backend: MemoryBackend,
+        backend: IngestTarget,
         model: string,
     ): Promise<void> {
         const meta = request.sessionMeta;

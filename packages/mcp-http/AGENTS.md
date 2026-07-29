@@ -36,7 +36,8 @@ the stats ledger — is **re-implemented here and must be kept in sync by hand**
 | `tools.py` | `GemdexTools` — the six wrappers: validate args → call BYOI → render. Mirrors `handlers.ts`. |
 | `descriptions.py` | Tool descriptions copied from TS `index.ts`, with the attachment-path caveat swapped in. |
 | `auth.py` | `build_auth_provider()` — **the single auth seam.** Static bearer, or `SingleUserGoogleProvider` (OAuth 2.1 + email allowlist). |
-| `server.py` | `build_server()` + `main()`. Registers tools + `/healthz`, runs `mcp.run(transport="http", …)`. |
+| `server.py` | `build_server()` + `main()`. Registers tools + `/healthz` + the sync route, runs `mcp.run(transport="http", …)`. |
+| `sync.py` | `POST /mcp/sync/records` — the chat-digest ingest route used by `gemdex sync-history`. Enforces auth itself (custom routes are auth-exempt), validates records, delegates to `ByoiClient.import_records`. **Not a tool.** |
 
 ## Three invariants that are easy to break
 
@@ -97,10 +98,47 @@ re-run `tests/test_auth_oauth.py` on every upgrade and treat a failure as a
 security regression. Those tests were mutation-checked: neutering either the
 email comparison or the `email_verified` guard makes them fail.
 
+### 4. Custom routes are auth-exempt — `/mcp/sync/records` guards itself
+
+**FastMCP's auth applies to the MCP endpoint, not to `@custom_route` handlers.**
+Verified empirically: on a custom route the `Authorization` header arrives and
+nothing has validated it — the request is *not* rejected the way a `/mcp` call
+without a token is. `/healthz` relies on this (the compose healthcheck must not
+need a token). A **write** route relying on it would be an unauthenticated
+import endpoint on the public internet.
+
+So `sync.py` calls `require_access_token()` first, which delegates to **the
+configured provider's own `verify_token`**. That single line is why there is no
+`if config.auth_mode` here: the static bearer and the google allowlist (including
+its `email_verified` check) both apply through the same seam invariant #3
+describes. A 401 answers with `WWW-Authenticate: Bearer realm="gemdex"` so an MCP
+client knows to start the OAuth flow.
+
+Two more properties of this route:
+
+- **It lives under `/mcp/`, and that is load-bearing.** The reference edge routes
+  `^/mcp` to this service and everything else to the web UI. A sibling
+  `/sync/records` would fall through to the web UI and 404 — i.e. fail *open* on
+  a misconfigured edge instead of loudly. Custom routes can nest under `/mcp`
+  (confirmed against the live route table).
+- **Ids must start with `chat:`.** The route exists for chat digests, whose ids
+  are deterministic (`chat:<source>:<sessionId>`) so re-syncing a session upserts
+  in place. Rejecting anything else keeps this from becoming a general-purpose
+  "write any memory by arbitrary id" API. Unknown fields are dropped, ≤50 records
+  per request, 100 MiB body cap.
+
+**Why a route rather than a seventh tool:** sync needs upsert-on-deterministic-id
+with `createdAt` preserved. `save_memory` mints a random id and `update_memory`
+requires an existing one, so no combination of the six tools can express it —
+only `/v1/import` can, and that is intentionally not on the agent surface. Adding
+a sync *tool* would also hand every connected agent a write-by-id capability it
+has no reason to have. `test_sync_route.py` asserts the tool list stays at six.
+
 ## Other gotchas
 
 - **Six tools, no delete** — same as the stdio surface, same reason (deletion is
-  a human action in the desktop app). `test_no_delete_tool` guards it.
+  a human action in the desktop app). `test_no_delete_tool` guards it. The sync
+  route is not a tool and must not become one.
 - **`ToolError`, never a raw exception.** Matches the TS handlers' "never throw
   to the protocol" rule; `GemdexTools._call` wraps every BYOI call so a transport
   failure becomes a readable tool error, not a crash.

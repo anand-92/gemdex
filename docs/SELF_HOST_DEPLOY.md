@@ -408,6 +408,24 @@ allowlisted Google account, and it stores the token itself. No bearer to paste.
 }
 ```
 
+### Sync chat history from each machine
+
+Agents read and write memories through `/mcp`. To also feed this deployment your
+**coding-agent chat history**, run `sync-history` on each machine you code on:
+
+```sh
+export GEMDEX_SYNC_URL=https://gemdex.example.com/mcp
+npx gemdex sync-history --source claude --dry-run   # scan + cost estimate
+npx gemdex sync-history --source claude
+```
+
+It authorizes in the browser once (same allowlisted Google account), then posts
+each digest to `POST /mcp/sync/records` — under `/mcp`, so the edge rules you
+already wrote cover it, and it is authenticated by the same allowlist as the
+tools. Digests are generated on the client with that machine's `GEMINI_API_KEY`;
+session ids are deterministic, so running it repeatedly (or from five machines)
+upserts rather than duplicates.
+
 ## 6. Verify the memory plane is NOT public
 
 Do this from a **different machine**, not the host. These are the checks that
