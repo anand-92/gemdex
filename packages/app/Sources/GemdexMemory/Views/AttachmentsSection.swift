@@ -200,6 +200,9 @@ struct AttachmentPreview: View {
                 if let data {
                     PDFThumbnail(data: data)
                 } else { placeholder("doc.richtext") }
+            case .file:
+                // Blob-only sources (e.g. full chat transcripts) — no media preview.
+                placeholder("doc.text")
             }
         }
         .background(Color(nsColor: .controlColor))

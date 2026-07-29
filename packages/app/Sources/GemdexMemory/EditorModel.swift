@@ -25,7 +25,7 @@ struct EditorAttachment: Identifiable {
 /// Attachment limits, matching the web app / gemdex-core validator.
 enum AttachmentLimits {
     static let maxBytesPerAttachment = 20 * 1024 * 1024
-    static let caps: [AttachmentKind: Int] = [.image: 6, .audio: 1, .video: 1, .pdf: 1]
+    static let caps: [AttachmentKind: Int] = [.image: 6, .audio: 1, .video: 1, .pdf: 1, .file: 1]
     static let allowedMimeTypes: Set<String> = [
         "image/png", "image/jpeg",
         "audio/mpeg", "audio/mp3", "audio/wav",
