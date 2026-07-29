@@ -1,11 +1,13 @@
 # Self-host deploy — public HTTPS MCP endpoint
 
 How to run Gemdex on a machine you own (Mac Mini, VPS) and expose **only** the
-MCP endpoint to the internet over HTTPS, so agents on any machine can reach your
-memory layer while the memory plane itself stays unreachable.
+MCP endpoint and the manager UI to the internet over HTTPS, so agents on any
+machine can reach your memory layer — and you can manage it from a browser —
+while the memory plane itself stays unreachable.
 
-The end state: `https://gemdex.example.com/mcp` works from anywhere, and
-Postgres and the BYOI bearer are not routable from the internet.
+The end state: `https://gemdex.example.com/mcp` serves agents,
+`https://gemdex.example.com/` serves you, and Postgres and the BYOI bearer are
+not routable from the internet.
 
 ## The shape
 
@@ -13,37 +15,50 @@ Postgres and the BYOI bearer are not routable from the internet.
    internet
       │  HTTPS + rate limiting
       ▼
-   ┌─────────────────────────────┐
-   │  edge (Cloudflare Tunnel    │  ← the ONLY public surface
-   │        or Caddy)            │
-   └─────────────────────────────┘
-      │  127.0.0.1:8766  (plaintext, never leaves the host)
-      ▼
-   ┌─────────────────────────────┐
-   │  gemdex-mcp-http   /mcp     │  OAuth 2.1 resource server, single user
-   └─────────────────────────────┘
-      │  http://gemdex-server:8765  (compose network only)
-      ▼
-   ┌─────────────────────────────┐
-   │  gemdex-server     /v1      │  BYOI. Host publish is 127.0.0.1 only.
-   └─────────────────────────────┘
+   ┌─────────────────────────────────────────────┐
+   │  edge (Cloudflare Tunnel or Caddy)          │  ← the ONLY public surface
+   │  routes by path:  /mcp → MCP    / → web     │
+   └─────────────────────────────────────────────┘
+      │  127.0.0.1:8766            │  127.0.0.1:8767
+      │  (plaintext, never leaves the host)
+      ▼                            ▼
+   ┌──────────────────────────┐  ┌──────────────────────────┐
+   │  gemdex-mcp-http  /mcp   │  │  gemdex-web         /    │
+   │  OAuth 2.1 resource      │  │  Google login → session  │
+   │  server. Agents.         │  │  cookie. You, a human.   │
+   │  Six tools, NO delete.   │  │  Full CRUD incl. delete. │
+   └──────────────────────────┘  └──────────────────────────┘
+      │                            │
+      │  http://gemdex-server:8765 (compose network only)
+      ▼                            ▼
+   ┌─────────────────────────────────────────────┐
+   │  gemdex-server     /v1                      │  BYOI. 127.0.0.1 only.
+   └─────────────────────────────────────────────┘
       │  postgres:5432  (compose network only, NO host port)
       ▼
-   ┌─────────────────────────────┐
-   │  postgres + pgvector        │
-   └─────────────────────────────┘
+   ┌─────────────────────────────────────────────┐
+   │  postgres + pgvector                        │
+   └─────────────────────────────────────────────┘
 ```
 
 Two rules the stack enforces, and the reasoning:
 
 1. **The BYOI bearer never becomes internet-reachable.** It is one long-lived
    secret with full read/write access to every memory and no per-user identity.
-   So `gemdex-server` publishes on `127.0.0.1` only, and `gemdex-mcp-http`
-   reaches it over the compose network instead.
-2. **Only `/mcp` is public, and only through the edge.** `gemdex-mcp-http` also
-   binds loopback; the edge terminates TLS and connects over `127.0.0.1`.
-   Publishing `0.0.0.0:8766` would expose plaintext HTTP directly, bypassing the
-   edge's TLS *and* its rate limiting.
+   So `gemdex-server` publishes on `127.0.0.1` only, and the two front-ends
+   reach it over the compose network instead. `gemdex-web` does hold that bearer
+   — server-side, never sent to the browser. That is what makes it a
+   backend-for-frontend rather than a CORS hole.
+2. **Only the edge is public.** Both front-ends bind loopback; the edge
+   terminates TLS and connects over `127.0.0.1`. Publishing `0.0.0.0:8766` or
+   `0.0.0.0:8767` would expose plaintext HTTP directly, bypassing the edge's TLS
+   *and* its rate limiting.
+
+**Why two containers rather than one.** They authenticate different kinds of
+caller. A browser cannot present a bearer token, so the UI needs a server-side
+session; and deletion is deliberately absent from the agent surface (root
+`AGENTS.md`: "six tools, no delete"), so folding the UI into MCP would mean
+either giving agents delete or leaving the UI unable to delete.
 
 ## Why `deploy/` and not `packages/server/docker-compose.yml`
 
@@ -76,15 +91,29 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-Generate the two secrets and put them in `.env`:
+Generate the three secrets and put them in `.env`:
 
 ```sh
 openssl rand -hex 32   # → GEMDEX_SERVER_TOKEN
 openssl rand -hex 32   # → POSTGRES_PASSWORD
+openssl rand -hex 32   # → GEMDEX_WEB_SESSION_SECRET
 ```
 
-Then set `GEMINI_API_KEY`, and `GEMDEX_MCP_BASE_URL` to the public URL you are
-about to create (e.g. `https://gemdex.example.com`, no trailing slash).
+`GEMDEX_WEB_SESSION_SECRET` signs the browser session cookie. Anyone who can
+guess it can forge a signed session and bypass the email allowlist entirely, so
+it is a real secret, not a salt — the service refuses to start on anything
+shorter than 32 characters.
+
+Then set `GEMINI_API_KEY`, and both public URLs to what you are about to create
+(no trailing slash):
+
+```
+GEMDEX_MCP_BASE_URL=https://gemdex.example.com      # the /mcp endpoint
+GEMDEX_WEB_BASE_URL=https://gemdex.example.com      # the UI (same host, path-routed)
+```
+
+They may be the same host (the edge routes `/mcp` → MCP, `/` → web) or separate
+subdomains — whichever you configure at the edge in step 4.
 
 `GEMDEX_MCP_BASE_URL` is the OAuth **issuer** and the **resource identity**, not
 just a display string. It must match what clients use and what you register with
@@ -96,27 +125,45 @@ Set up the OAuth client and put the ID/secret plus `GEMDEX_ALLOWED_EMAIL` into
 `.env`. Full click-path and the reason it can't be scripted:
 [`packages/mcp-http/README.md`](../packages/mcp-http/README.md#setting-up-the-google-oauth-client).
 
-The redirect URI must be exactly `<GEMDEX_MCP_BASE_URL>/auth/callback`. Google
-matches it byte-for-byte; a trailing slash or an `http`/`https` mismatch shows up
-as `redirect_uri_mismatch` at the end of the login flow.
+**One OAuth client serves both services** — a client may hold several authorized
+redirect URIs. Register *both*, exactly:
 
-`GEMDEX_ALLOWED_EMAIL` is the real authorization boundary. Google will
-authenticate *every* Google account; that one address is what makes this
-deployment yours.
+```
+<GEMDEX_MCP_BASE_URL>/auth/callback           ← the MCP endpoint
+<GEMDEX_WEB_BASE_URL>/auth/google/callback    ← the manager UI
+```
+
+Google matches these byte-for-byte; a trailing slash or an `http`/`https`
+mismatch shows up as `redirect_uri_mismatch` at the end of the login flow. Both
+services print the exact string they expect at startup, so
+`docker compose logs gemdex-web | grep 'redirect URI'` is the fastest way to
+check what to paste.
+
+`GEMDEX_ALLOWED_EMAIL` is the real authorization boundary, shared by both
+surfaces. Google will authenticate *every* Google account; that one address is
+what makes this deployment yours.
 
 ## 3. Start the stack
 
 ```sh
 cd deploy
-docker compose up -d --build      # first run builds both images
-docker compose ps                 # all three should reach "healthy"
+docker compose up -d --build      # first run builds all three images
+docker compose ps                 # all four should reach "healthy"
 ```
 
 Verify locally before exposing anything:
 
 ```sh
 curl -fsS http://127.0.0.1:8765/v1/health   # {"ok":true}
-curl -fsS http://127.0.0.1:8766/healthz     # ok
+curl -fsS http://127.0.0.1:8766/healthz     # ok   (MCP)
+curl -fsS http://127.0.0.1:8767/healthz     # ok   (web)
+```
+
+The UI answering **401** on its API without a session is correct — it fails
+closed:
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8767/api/memories   # 401
 ```
 
 `/mcp` answering **401** is correct — it means the OAuth resource server is
@@ -155,12 +202,69 @@ tunnel: gemdex
 credentials-file: /Users/CHANGEME/.cloudflared/<TUNNEL-UUID>.json
 
 ingress:
-  # Only the MCP service. Everything else 404s at the edge, so the BYOI is
-  # unreachable even if something later publishes it on the host by mistake.
+  # Path-routed: /mcp to the agent surface, everything else to the UI. Anything
+  # not matched 404s at the edge, so the BYOI stays unreachable even if
+  # something later publishes it on the host by mistake.
+  #
+  # cloudflared matches ingress rules in order and `path` is a regex, so the
+  # /mcp rule must come first — otherwise the catch-all hostname rule below
+  # would swallow it.
   - hostname: gemdex.example.com
+    path: ^/mcp
     service: http://127.0.0.1:8766
+  - hostname: gemdex.example.com
+    service: http://127.0.0.1:8767
   - service: http_status:404
 ```
+
+The MCP endpoint also serves OAuth discovery at
+`/.well-known/oauth-protected-resource/mcp` and `/.well-known/oauth-authorization-server`,
+plus `/authorize`, `/token`, `/register`, and `/auth/callback`. With the rules
+above those land on the **web** service, which does not serve them — so if you
+path-route, add them to the MCP rule:
+
+```yaml
+  - hostname: gemdex.example.com
+    path: ^/(mcp|authorize|token|register|auth/callback|\.well-known/oauth)
+    service: http://127.0.0.1:8766
+```
+
+**Simpler and less error-prone: give each service its own hostname.** Then no
+path regex has to be exactly right, and the two OAuth callback paths cannot
+collide:
+
+```yaml
+ingress:
+  - hostname: gemdex.example.com          # agents  → GEMDEX_MCP_BASE_URL
+    service: http://127.0.0.1:8766
+  - hostname: app.gemdex.example.com      # browser → GEMDEX_WEB_BASE_URL
+    service: http://127.0.0.1:8767
+  - service: http_status:404
+```
+
+Set `GEMDEX_MCP_BASE_URL` and `GEMDEX_WEB_BASE_URL` to match whichever you pick,
+and register the matching redirect URIs with Google. Remember to
+`cloudflared tunnel route dns` each hostname.
+
+Whichever you choose, check the routing before trusting it — `cloudflared` tests
+a URL against every rule and prints the one that wins:
+
+```sh
+cloudflared tunnel ingress validate
+cloudflared tunnel ingress rule https://gemdex.example.com/mcp
+cloudflared tunnel ingress rule https://gemdex.example.com/auth/google/callback
+```
+
+The path-routed config above was checked this way. The case worth confirming
+yourself is the near-miss pair, since both services own an `/auth/*` route:
+
+| URL | Goes to |
+|-----|---------|
+| `/mcp` | `:8766` MCP |
+| `/.well-known/oauth-authorization-server` | `:8766` MCP |
+| `/auth/callback` | `:8766` MCP |
+| `/auth/google/callback` | `:8767` web |
+| `/api/memories`, `/` | `:8767` web |
 
 Route DNS and run it:
 
@@ -181,9 +285,14 @@ In the dashboard: **Security → WAF → Rate limiting rules**.
 |------|-------|-------|--------|
 | MCP calls | `http.request.uri.path eq "/mcp"` | 600 / 1 min per IP | Block 1 min |
 | OAuth flow | `http.request.uri.path in {"/authorize" "/token" "/register"}` | 20 / 1 min per IP | Block 5 min |
+| Web login | `http.request.uri.path in {"/auth/login" "/auth/google/callback"}` | 20 / 1 min per IP | Block 5 min |
+| Web API | `starts_with(http.request.uri.path, "/api/")` | 300 / 1 min per IP | Block 1 min |
 
 Keep the `/mcp` ceiling generous: a single agent session legitimately makes many
-tool calls in a burst, and a limit tuned for humans will break real work.
+tool calls in a burst, and a limit tuned for humans will break real work. The
+`/api/` ceiling can be far lower — it is one human clicking, and the UI debounces
+its search — but not *too* low: the memory list plus a status poll can fire
+several requests per page view.
 
 Worth adding, since this deployment has exactly one user:
 
@@ -216,7 +325,7 @@ gemdex.example.com {
 		}
 		zone oauth {
 			match {
-				path /authorize /token /register
+				path /authorize /token /register /auth/*
 			}
 			key    {remote_host}
 			events 20
@@ -224,11 +333,55 @@ gemdex.example.com {
 		}
 	}
 
-	# Streamable HTTP keeps long-lived responses open; the default write timeout
-	# would sever them mid-stream.
+	# Order matters: Caddy evaluates handle blocks by specificity, but making the
+	# split explicit keeps it obvious which origin serves what.
+	#
+	# The MCP endpoint owns OAuth discovery and the token endpoints as well as
+	# /mcp itself — route them together or client bootstrap breaks.
+	handle /mcp* {
+		# Streamable HTTP keeps long-lived responses open; the default write
+		# timeout would sever them mid-stream.
+		reverse_proxy 127.0.0.1:8766 {
+			flush_interval -1
+		}
+	}
+	handle /.well-known/oauth-* {
+		reverse_proxy 127.0.0.1:8766
+	}
+	handle /authorize* {
+		reverse_proxy 127.0.0.1:8766
+	}
+	handle /token* {
+		reverse_proxy 127.0.0.1:8766
+	}
+	handle /register* {
+		reverse_proxy 127.0.0.1:8766
+	}
+	handle /auth/callback* {
+		reverse_proxy 127.0.0.1:8766
+	}
+
+	# Everything else is the manager UI, including /auth/google/callback.
+	handle {
+		reverse_proxy 127.0.0.1:8767
+	}
+}
+```
+
+The path split above is fiddly precisely because both services own an `/auth/*`
+route. **Two hostnames avoid the whole problem** and are the better default:
+
+```caddyfile
+gemdex.example.com {          # agents  → GEMDEX_MCP_BASE_URL
+	encode gzip
 	reverse_proxy 127.0.0.1:8766 {
 		flush_interval -1
 	}
+}
+
+app.gemdex.example.com {      # browser → GEMDEX_WEB_BASE_URL
+	encode gzip
+	reverse_proxy 127.0.0.1:8767
 }
 ```
 
@@ -277,7 +430,19 @@ curl -s -o /dev/null -w '%{http_code}\n' "http://$PUBLIC:8765/v1/health" # → f
 
 # 3. Postgres must not answer at all.
 nc -zv "$PUBLIC" 5432    # → refused / timeout
+
+# 4. The manager UI is reachable but fails closed — its API must never serve
+#    data without a session. A 200 here would mean unauthenticated CRUD,
+#    including delete.
+curl -s -o /dev/null -w '%{http_code}\n' "https://$PUBLIC/api/memories"   # → 401
+curl -s -o /dev/null -w '%{http_code}\n' "https://$PUBLIC/api/status"     # → 401
+
+#    And confirm login mode is not `dev`. This must NOT say "dev":
+curl -s "https://$PUBLIC/api/session"     # → {"authenticated":false,...,"authMode":"google"}
 ```
+
+If `authMode` reports `dev`, stop: the deployment has **no login at all** and
+anyone who can reach the URL can delete every memory.
 
 On the host itself, confirm the bindings are loopback-scoped:
 
@@ -288,6 +453,7 @@ cd deploy
 docker compose ps --format '{{.Service}}\t{{.Ports}}'
 docker port gemdex-deploy-gemdex-server-1     # 8765/tcp -> 127.0.0.1:8765
 docker port gemdex-deploy-gemdex-mcp-http-1   # 8766/tcp -> 127.0.0.1:8766
+docker port gemdex-deploy-gemdex-web-1        # 8767/tcp -> 127.0.0.1:8767
 
 # Postgres has no published ports at all — this prints nothing.
 docker port gemdex-deploy-postgres-1
@@ -295,6 +461,8 @@ docker port gemdex-deploy-postgres-1
 # And prove it from the host's own LAN address (substitute your interface).
 LANIP=$(ipconfig getifaddr en0)                       # macOS
 curl -m 4 -s -o /dev/null -w '%{http_code}\n' "http://$LANIP:8765/v1/health"   # → 000
+curl -m 4 -s -o /dev/null -w '%{http_code}\n' "http://$LANIP:8766/healthz"     # → 000
+curl -m 4 -s -o /dev/null -w '%{http_code}\n' "http://$LANIP:8767/healthz"     # → 000
 nc -z -G 3 "$LANIP" 5432 && echo OPEN-BAD || echo closed-good
 ```
 

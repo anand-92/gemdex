@@ -1,0 +1,518 @@
+/*
+ * Hand-written CSS, no framework.
+ *
+ * The whole UI is four views; a component library would be a larger download
+ * than the app and would still need overriding. Dark-first because the app sits
+ * next to a terminal, with `prefers-color-scheme: light` honored.
+ */
+
+:root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-hover: #1c2029;
+    --border: #262b36;
+    --text: #e6e8eb;
+    --muted: #98a1b0;
+    --accent: #6ea8fe;
+    --danger: #f2555a;
+    --ok: #4ec9a0;
+    --warn: #e3b341;
+    --radius: 9px;
+}
+
+@media (prefers-color-scheme: light) {
+    :root {
+        --bg: #f7f8fa;
+        --panel: #ffffff;
+        --panel-hover: #f0f2f6;
+        --border: #dfe3ea;
+        --text: #1a1d23;
+        --muted: #5f6774;
+        --accent: #1a63d8;
+        --danger: #cf2b30;
+        --ok: #14855f;
+        --warn: #96690a;
+    }
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+code,
+pre,
+.id {
+    font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+    font-size: 0.9em;
+}
+
+a {
+    color: var(--accent);
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+/* --- layout ------------------------------------------------------------ */
+
+.app-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+
+.brand {
+    font-weight: 650;
+    font-size: 1.05rem;
+    color: var(--text);
+}
+
+.app-header nav {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+}
+
+main {
+    max-width: 62rem;
+    margin: 0 auto;
+    padding: 24px 20px 64px;
+}
+
+main.centered {
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+}
+
+.login-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 32px 36px;
+    text-align: center;
+    max-width: 22rem;
+}
+
+.login-card h1 {
+    margin: 0 0 6px;
+    font-size: 1.3rem;
+}
+
+/* --- toolbar / search -------------------------------------------------- */
+
+.toolbar {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+}
+
+.search {
+    flex: 1 1 18rem;
+    min-width: 0;
+    padding: 9px 12px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    font-size: 0.95rem;
+}
+
+.search:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+button:focus-visible,
+a:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+
+.mode-toggle {
+    display: flex;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+}
+
+.mode-toggle button {
+    border: 0;
+    border-radius: 0;
+    background: var(--panel);
+    color: var(--muted);
+    padding: 9px 14px;
+}
+
+.mode-toggle button.active {
+    background: var(--accent);
+    color: #fff;
+}
+
+/* --- buttons ----------------------------------------------------------- */
+
+button,
+.button-link {
+    font: inherit;
+    padding: 8px 14px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    cursor: pointer;
+    display: inline-block;
+}
+
+button:hover:not(:disabled),
+.button-link:hover {
+    background: var(--panel-hover);
+    text-decoration: none;
+}
+
+button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+button.primary,
+.button-link.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+
+button.danger {
+    color: var(--danger);
+    border-color: var(--danger);
+}
+
+button.danger:hover:not(:disabled) {
+    background: var(--danger);
+    color: #fff;
+}
+
+button.link {
+    border: 0;
+    background: none;
+    color: var(--accent);
+    padding: 0;
+}
+
+.actions {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+/* --- memory list ------------------------------------------------------- */
+
+.memory-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.memory-card {
+    display: block;
+    padding: 13px 15px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+}
+
+.memory-card:hover {
+    background: var(--panel-hover);
+    border-color: var(--accent);
+    text-decoration: none;
+}
+
+.memory-title {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 3px;
+}
+
+.memory-preview {
+    display: block;
+    color: var(--muted);
+    font-size: 0.9rem;
+    /* Two-line clamp: previews are ~100 chars and a ragged list is hard to scan. */
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+}
+
+.memory-meta {
+    display: flex;
+    gap: 14px;
+    margin-top: 7px;
+    flex-wrap: wrap;
+}
+
+.meta {
+    color: var(--muted);
+    font-size: 0.85rem;
+}
+
+.count {
+    margin: 0 0 12px;
+}
+
+.hint {
+    margin-top: 14px;
+}
+
+.empty {
+    padding: 28px 0;
+    color: var(--muted);
+}
+
+.pager {
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    justify-content: center;
+    margin-top: 20px;
+}
+
+/* --- detail ------------------------------------------------------------ */
+
+.back {
+    display: inline-block;
+    margin-bottom: 16px;
+    font-size: 0.9rem;
+}
+
+.detail-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+.detail-header h2 {
+    margin: 0;
+    font-size: 1.25rem;
+    /* Long unbroken content-derived titles must not push the buttons offscreen. */
+    overflow-wrap: anywhere;
+}
+
+.content {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    margin: 16px 0;
+}
+
+.id {
+    color: var(--muted);
+}
+
+.field {
+    display: block;
+    margin-bottom: 14px;
+}
+
+.field > span {
+    display: block;
+    margin-bottom: 5px;
+    font-size: 0.85rem;
+    color: var(--muted);
+}
+
+.field input,
+.field textarea {
+    width: 100%;
+    padding: 10px 12px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    font: inherit;
+}
+
+.field textarea {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.9rem;
+    resize: vertical;
+}
+
+/* --- attachments ------------------------------------------------------- */
+
+.attachments h3 {
+    font-size: 0.95rem;
+    margin: 24px 0 10px;
+}
+
+.attachments ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.attachments li {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 14px;
+    padding: 10px 14px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    flex-wrap: wrap;
+}
+
+.attachment-name {
+    overflow-wrap: anywhere;
+}
+
+/* --- status ------------------------------------------------------------ */
+
+.status-grid {
+    display: grid;
+    grid-template-columns: minmax(8rem, max-content) 1fr;
+    gap: 8px 20px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    margin: 0 0 20px;
+}
+
+.status-grid dt {
+    color: var(--muted);
+    font-size: 0.9rem;
+}
+
+.status-grid dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+.ok {
+    color: var(--ok);
+}
+
+.bad {
+    color: var(--danger);
+}
+
+.warn {
+    color: var(--warn);
+}
+
+.dev-badge {
+    font-size: 0.78rem;
+    padding: 3px 8px;
+    border-radius: 20px;
+    background: var(--warn);
+    color: #1a1d23;
+    font-weight: 600;
+}
+
+/* --- feedback ---------------------------------------------------------- */
+
+.error {
+    background: color-mix(in srgb, var(--danger) 14%, transparent);
+    border: 1px solid var(--danger);
+    color: var(--danger);
+    padding: 10px 14px;
+    border-radius: var(--radius);
+    margin: 0 0 14px;
+}
+
+/* --- modal ------------------------------------------------------------- */
+
+.modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgb(0 0 0 / 62%);
+    display: grid;
+    place-items: center;
+    padding: 20px;
+    z-index: 100;
+}
+
+.modal {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 24px 26px;
+    max-width: 30rem;
+}
+
+.modal h3 {
+    margin: 0 0 12px;
+}
+
+.modal .actions {
+    margin-top: 20px;
+    justify-content: flex-end;
+}
+
+/* --- responsive -------------------------------------------------------- */
+
+@media (max-width: 34rem) {
+    .app-header {
+        padding: 12px 14px;
+    }
+
+    .app-header nav {
+        gap: 13px;
+    }
+
+    main {
+        padding: 18px 14px 48px;
+    }
+
+    .toolbar {
+        gap: 8px;
+    }
+
+    .search {
+        flex-basis: 100%;
+    }
+
+    .detail-header .actions {
+        width: 100%;
+    }
+
+    .status-grid {
+        /* Two columns get unreadably narrow on a phone. */
+        grid-template-columns: 1fr;
+        gap: 2px 0;
+    }
+
+    .status-grid dd {
+        margin-bottom: 10px;
+    }
+}

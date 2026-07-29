@@ -178,48 +178,92 @@ services:
       start_period: 15s
       retries: 6
 
-  # --- gemdex-web (GEM2-5) — NOT YET IMPLEMENTED -------------------------
+  # --- gemdex-web — the human manager UI (GEM2-5) -------------------------
   #
-  # The manager UI lands in GEM2-5; `packages/web` does not exist yet, so this
-  # is a placeholder, not a working service. Uncomment it only once that
-  # package exists — `docker compose up` will fail on the missing build
-  # context otherwise.
+  # A React SPA plus a FastAPI backend-for-frontend, on its own origin. The two
+  # decisions the placeholder left open, and how they were settled:
   #
-  # Two open decisions to settle in GEM2-5, both affecting the edge:
-  #   1. Separate container (as sketched) vs static assets served by mcp-http.
-  #      A separate origin means the edge routes by path (/ → web, /mcp → MCP).
-  #   2. It must NOT get the BYOI bearer. The browser is untrusted, so the UI
-  #      should authenticate as the OAuth user and go through mcp-http, rather
-  #      than holding a full-access token.
+  #   1. Separate container, not static assets bolted onto mcp-http. The UI needs
+  #      a *server-side session* (browsers cannot present bearer tokens) and it
+  #      needs DELETE, which the MCP surface deliberately does not have. Those
+  #      are different auth models on different paths, so the edge routes by
+  #      path: / → gemdex-web, /mcp → gemdex-mcp-http.
   #
-  # gemdex-web:
-  #   image: gemdex-web:local
-  #   build:
-  #     context: ..
-  #     dockerfile: packages/web/Dockerfile
-  #   restart: unless-stopped
-  #   init: true
-  #   depends_on:
-  #     gemdex-mcp-http:
-  #       condition: service_healthy
-  #   # Loopback only, like everything else — the edge fronts it.
-  #   ports:
-  #     - "127.0.0.1:${GEMDEX_WEB_PORT:-8767}:8767"
-  #   environment:
-  #     # Public URL of the MCP endpoint the UI talks to (same origin as the
-  #     # OAuth issuer).
-  #     GEMDEX_MCP_BASE_URL: ${GEMDEX_MCP_BASE_URL:-}
-  #   read_only: true
-  #   tmpfs:
-  #     - /tmp
-  #   security_opt:
-  #     - no-new-privileges:true
-  #   healthcheck:
-  #     test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8767/healthz"]
-  #     interval: 10s
-  #     timeout: 5s
-  #     start_period: 15s
-  #     retries: 6
+  #   2. It does hold the BYOI bearer — and that is the point of a BFF. The
+  #      original note said the UI "should go through mcp-http rather than
+  #      holding a full-access token", but the browser is not what holds it: the
+  #      token lives in this container and never reaches the page. Routing the UI
+  #      through mcp-http would mean either adding a delete tool to the agent
+  #      surface (breaking "six tools, no delete") or leaving the UI unable to
+  #      delete. So the trust boundary is the container, not the transport.
+  #
+  # This service is stateless: the session is a signed cookie held by the
+  # browser, so unlike mcp-http it needs no volume and no writable state dir.
+  gemdex-web:
+    image: gemdex-web:local
+    build:
+      context: ..
+      dockerfile: packages/web/Dockerfile
+    restart: unless-stopped
+    init: true
+    depends_on:
+      gemdex-server:
+        # The BFF talks to the BYOI directly, so that — not mcp-http — is its
+        # real dependency. It degrades gracefully (the status page reports the
+        # outage), but starting in order avoids a confusing first paint.
+        condition: service_healthy
+    # Loopback only, like everything else — the edge fronts it.
+    ports:
+      - "127.0.0.1:${GEMDEX_WEB_PORT:-8767}:8767"
+    environment:
+      # Service DNS on the compose network, not 127.0.0.1 (which inside this
+      # container would be the container itself).
+      GEMDEX_SERVER_URL: http://gemdex-server:8765
+      GEMDEX_SERVER_TOKEN: ${GEMDEX_SERVER_TOKEN:?Set GEMDEX_SERVER_TOKEN in .env}
+
+      # `google` = Google login restricted to GEMDEX_ALLOWED_EMAIL.
+      # `dev` = NO LOGIN AT ALL. Never put dev mode behind a public edge.
+      GEMDEX_WEB_AUTH: ${GEMDEX_WEB_AUTH:-google}
+
+      # Required when GEMDEX_WEB_AUTH=google. GEMDEX_WEB_BASE_URL must be the
+      # PUBLIC https URL: it builds the OAuth redirect URI, which Google matches
+      # by exact string. Reuse the same OAuth client as mcp-http by adding
+      # <GEMDEX_WEB_BASE_URL>/auth/google/callback to its authorized redirect
+      # URIs — one client can hold several.
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      GEMDEX_WEB_BASE_URL: ${GEMDEX_WEB_BASE_URL:-}
+      GEMDEX_ALLOWED_EMAIL: ${GEMDEX_ALLOWED_EMAIL:-}
+
+      # Signs session cookies. Anyone who can guess it can forge a session and
+      # bypass the email allowlist, so it is a real secret: `openssl rand -hex 32`.
+      # Changing it signs everyone out.
+      GEMDEX_WEB_SESSION_SECRET: ${GEMDEX_WEB_SESSION_SECRET:-}
+      GEMDEX_WEB_SESSION_TTL_SECONDS: ${GEMDEX_WEB_SESSION_TTL_SECONDS:-43200}
+
+      # In a container `0.0.0.0` is the namespace's edge, not an exposure — the
+      # published port above is loopback-only. dev mode refuses a non-loopback
+      # bind unless this is set, so it is required for dev mode *here* and is
+      # inert in google mode.
+      GEMDEX_WEB_UNSAFE_DEV_BIND: ${GEMDEX_WEB_UNSAFE_DEV_BIND:-false}
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # /healthz, not /api/*: in google mode every API call is a 401 until a
+      # browser signs in, which would mark this container unhealthy forever.
+      # `python`, not `wget` — the slim image has no wget.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8767/healthz',timeout=2).status==200 else 1)"
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 6
 
 volumes:
   gemdex-postgres:
