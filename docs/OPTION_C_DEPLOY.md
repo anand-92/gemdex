@@ -8,7 +8,7 @@ digests, and MCP **`read_attachment`**.
 | Area | Change |
 |------|--------|
 | Postgres | Migration `003` rebuilds document/attachment/chunk tables with **TEXT** memory ids; attachment `kind` allows `file`. |
-| Ingest | New digests attach full transcript as non-embedded `file` blob (`id=transcript`, caption `Full transcript (source file)`). Digest text still embeds only. |
+| Ingest | New digests attach a **cleaned plain-text** transcript as a non-embedded `file` blob (`id=transcript`, `text/plain`). Wire JSONL bloat (thinking, signatures, message ids, system-reminders) is stripped at attach time; digest text still embeds only. |
 | Backfill | `gemdex backfill-transcripts` and `gemdex import-local-to-remote --attach-transcripts`. |
 | MCP | 6th tool: `read_attachment` (local + remote, no `GEMINI_API_KEY`). |
 

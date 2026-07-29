@@ -197,7 +197,7 @@ describe('IngestManager.run — standard mode', () => {
         expect(backend.imported).toHaveLength(1);
     });
 
-    it('attaches the full transcript as a non-embedded file blob without inlining it in content', async () => {
+    it('attaches a cleaned plain-text transcript blob without inlining it in content', async () => {
         const filePath = writeSession('a.jsonl', 'sess-a');
         const rawTranscript = fs.readFileSync(filePath, 'utf8');
         const backend = fakeBackend();
@@ -207,9 +207,15 @@ describe('IngestManager.run — standard mode', () => {
         expect(record.attachments).toHaveLength(1);
         expect(record.attachments![0].id).toBe('transcript');
         expect(record.attachments![0].caption).toBe('Full transcript (source file)');
-        expect(record.attachments![0].mimeType).toMatch(/json|ndjson|plain/);
-        expect(Buffer.from(record.attachments![0].data, 'base64').toString('utf8')).toBe(rawTranscript);
-        // Digest content stays the summary — not the multi-line raw transcript body.
+        expect(record.attachments![0].mimeType).toBe('text/plain');
+        const cleaned = Buffer.from(record.attachments![0].data, 'base64').toString('utf8');
+        // Cleaned User/Assistant form — not the raw agent JSONL wire log.
+        expect(cleaned).toContain('User:');
+        expect(cleaned).toContain('Assistant:');
+        expect(cleaned).toContain('done');
+        expect(cleaned).not.toBe(rawTranscript);
+        expect(cleaned).not.toContain('"type":"user"');
+        // Digest content stays the summary — not the transcript body.
         expect(record.content).not.toContain('"type":"user"');
         expect(record.content).toContain('It got done.');
         expect(record.content).toContain(`Full transcript: ${filePath}`);

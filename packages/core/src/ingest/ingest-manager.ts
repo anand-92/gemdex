@@ -442,8 +442,10 @@ export class IngestManager {
         const content = renderDigestMemory(digest, meta);
         // Digest text stays searchable/embeddable; full transcript is a
         // non-embedded blob attachment so hybrid search is not polluted.
+        // Cleaned plain-text transcript (no JSONL wire bloat / thinking / signatures).
         const transcript = readTranscriptAttachment(meta.filePath, {
             caption: TRANSCRIPT_ATTACHMENT_CAPTION,
+            source: meta.source,
         });
         let record: MemoryExportRecord = {
             id: memoryId,
@@ -455,11 +457,15 @@ export class IngestManager {
         };
         // If the explicit path failed, still try the content footer (same path).
         if (!transcript) {
-            const attached = attachTranscriptToRecord(record, { filePath: meta.filePath, force: true });
+            const attached = attachTranscriptToRecord(record, {
+                filePath: meta.filePath,
+                force: true,
+                source: meta.source,
+            });
             record = attached.record;
             if (attached.status === 'missing') {
                 console.error(
-                    `[ingest] transcript file missing for ${memoryId}; saving digest without attachment: ${meta.filePath}`,
+                    `[ingest] transcript file missing or empty after clean for ${memoryId}: ${meta.filePath}`,
                 );
             }
         }
