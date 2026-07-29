@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { MemoryExportAttachment, MemoryExportRecord } from '../memory/types';
 import { parseSessionFile, renderTranscript } from './transcript-parser';
-import type { IngestSource } from './types';
+import type { IngestSource, SessionTurn } from './types';
 
 /** Caption used for the cleaned session transcript blob on digest memories. */
 export const TRANSCRIPT_ATTACHMENT_CAPTION = 'Full transcript (source file)';
@@ -112,6 +112,31 @@ export function readTranscriptAttachment(
         mimeType: TRANSCRIPT_CLEAN_MIME,
         data: Buffer.from(cleaned, 'utf8').toString('base64'),
         caption,
+    };
+}
+
+/**
+ * Build the transcript attachment from an already-parsed session instead of
+ * re-reading a file. The uploaded-session path has bytes, not a path on the
+ * ingesting host, and it has already parsed them to produce the digest — so
+ * re-reading would be both impossible and wasteful.
+ *
+ * Returns `null` when the cleaned text is empty, matching
+ * {@link readTranscriptAttachment}'s contract.
+ */
+export function transcriptAttachmentFromTurns(
+    turns: SessionTurn[],
+    options: { id?: string; caption?: string; charCap?: number } = {},
+): MemoryExportAttachment | null {
+    if (turns.length === 0) return null;
+    const cap = options.charCap ?? TRANSCRIPT_ATTACHMENT_CHAR_CAP;
+    const cleaned = renderTranscript(turns, cap).trim();
+    if (cleaned.length === 0) return null;
+    return {
+        id: options.id ?? TRANSCRIPT_ATTACHMENT_ID,
+        mimeType: TRANSCRIPT_CLEAN_MIME,
+        data: Buffer.from(cleaned, 'utf8').toString('base64'),
+        caption: options.caption ?? TRANSCRIPT_ATTACHMENT_CAPTION,
     };
 }
 

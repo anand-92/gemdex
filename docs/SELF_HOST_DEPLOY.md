@@ -426,6 +426,25 @@ tools. Digests are generated on the client with that machine's `GEMINI_API_KEY`;
 session ids are deterministic, so running it repeatedly (or from five machines)
 upserts rather than duplicates.
 
+### Or upload sessions from the browser
+
+The web manager's **Upload sessions** page is the other half of the same
+feature, for the cases the CLI cannot cover: a machine where you will not install
+the CLI, a transcript someone exported and sent you, or a laptop with no Gemini
+key of its own.
+
+Drop `.jsonl` transcripts (or a `.zip` of them) and **this deployment** does the
+cleaning and digesting, using the `GEMINI_API_KEY` you already set for
+`gemdex-server`. Nothing else to configure — and note that no key is added to
+`gemdex-web`: it forwards the transcripts to `gemdex-server`, which is the only
+container that has the ingest pipeline, the key, and the database together.
+
+Both routes converge on the same `chat:<source>:<sessionId>` memory, so a session
+you upload after having synced it is **updated, not duplicated** — mixing the two
+paths is safe. If uploads answer `503`, `GEMINI_API_KEY` is missing from
+`gemdex-server`'s environment (recall and browsing keep working; only digesting
+needs it).
+
 ## 6. Verify the memory plane is NOT public
 
 Do this from a **different machine**, not the host. These are the checks that
@@ -554,5 +573,8 @@ Postgres volume is not something either of them expects.
 | `/mcp` returns 401 with a valid-looking token | Expected if the token expired or the allowlist changed — it is re-checked on every request, not just at login. |
 | `503` from a tool call, health still green | No database configured, or Postgres is unhealthy. Green `/v1/health` does not mean storage works. |
 | Saves fail, health green | `GEMINI_API_KEY` missing or invalid — the server owns embedding and only fails at request time. |
+| Session upload returns `503` | Same cause: `gemdex-server` has no `GEMINI_API_KEY`, so it cannot digest. Digesting happens there, not in `gemdex-web`. |
+| Session upload says a file was "skipped" | Not an error. Either the file is not an agent transcript (`unparseable`) or the session is too short to be worth a digest (`trivial`). No Gemini call was made. |
+| Uploaded a session that was already synced | Expected to be a no-op-ish update: both paths derive the same `chat:<source>:<sessionId>` id, so it upserts. |
 | `mcp-http` restart-loops on a permission error | Its state volume is root-owned. The image pre-creates `/var/lib/gemdex` as uid 10001 to prevent this; a volume created by an older image predates that fix — `docker compose down -v` (destroys MCP state only) or `chown -R 10001:10001` inside it. |
 | Stack didn't come back after reboot (macOS) | LaunchAgents run at login. Enable automatic login on a headless host. |

@@ -19,7 +19,8 @@ memory logic:
 ```
 
 It is the *only* surface with delete, and the only one that authenticates a
-**person** rather than a **program**.
+**person** rather than a **program**. It is also the only surface where a human
+can hand raw chat transcripts to the deployment to digest (see §7).
 
 ## The architectural idea: two credentials that never meet
 
@@ -46,10 +47,12 @@ and it always uses the configured token.
 | `src/gemdex_web/byoi.py` | `ByoiClient` — the async `/v1` client. **The only module that touches the network.** Has `delete()`, which mcp-http's deliberately does not. |
 | `src/gemdex_web/auth.py` | **The single auth seam.** Google authorization-code flow, ID-token claim validation, the email allowlist, the `require_identity` dependency. |
 | `src/gemdex_web/routes.py` | The `/api` router. Every route sits behind `require_identity`. Owns search, pagination, and response projection. |
+| `src/gemdex_web/uploads.py` | Session-upload **decoding** only: multipart entries → transcripts, zip expansion, size/type limits. Pure, no network. |
 | `src/gemdex_web/app.py` | `create_app()` — session middleware, auth routes, API, SPA serving. |
 | `src/gemdex_web/server.py` | `main()` entrypoint: resolve config, print posture, run uvicorn. |
 | `frontend/src/api.ts` | The SPA's only `fetch` call site, plus the types that mirror the BFF's projections. |
-| `frontend/src/router.ts` | ~50-line hash router. **Extension point for GEM2-7/8.** |
+| `frontend/src/router.ts` | ~50-line hash router. **Extension point** — `upload` was added by adding one `Route` variant, one `parseRoute` case, one `App` branch. |
+| `frontend/src/views/UploadSessions.tsx` | The chat-session upload page (history path B). |
 
 ## Invariants that are easy to break
 
@@ -133,10 +136,77 @@ hit reached the browser as `null` — invisible to the mocked test suite because
 the fake had the same wrong shape. The fake now mirrors the live response, and
 `test_recall_normalizes_the_flat_upstream_shape` pins it.
 
+### 7. Session upload forwards; the **host** digests. This service holds no Gemini key
+
+`POST /api/sessions/upload` (history "path B") decodes the multipart form,
+expands zips, and forwards the transcripts to `POST /v1/sessions/ingest` on
+`gemdex-server`. It does not clean, digest, or embed anything.
+
+The reasoning, because this is the one design decision in the feature and the
+tempting alternatives are all worse:
+
+- **The pipeline is `gemdex-core`, which is TypeScript.** This service is Python
+  and structurally cannot import it — the same constraint that makes `mcp-http`
+  a thin `/v1` wrapper.
+- **Reimplementing it here would fork the digest.** Path A (`gemdex sync-history`
+  on a laptop) and path B must produce byte-comparable memories: same cleaning,
+  same prompt, and above all the same deterministic
+  `chat:<source>:<sessionId>` id, which is what makes re-upload an *upsert*
+  rather than a duplicate. Two implementations of that would drift on the first
+  prompt tweak, and the failure mode is silent — duplicate memories with
+  different digests of the same session.
+- **Bundling Node into this image was rejected.** The web Dockerfile builds the
+  SPA in a Node stage and deliberately drops Node from the runtime image; adding
+  it back plus a built copy of core would double the image's toolchain surface
+  *and* require `GEMINI_API_KEY` in a third container.
+- **`POST /mcp/sync/records` alone is not enough.** That route (GEM2-6) takes
+  records that are *already digested* — it is path A's push endpoint. Path B's
+  input is a raw transcript, so something has to do the digesting first.
+
+`gemdex-server` is the only process that already holds all three prerequisites
+at once: core's ingest pipeline, a `GEMINI_API_KEY`, and the store. So the work
+goes there and **the key stays exactly where it already was.** This service's
+credential inventory is unchanged by this feature, which is the property that
+matters given the section above.
+
+Two consequences worth keeping:
+
+- **Uploads must degrade per file.** Every digest is a paid model call, so a
+  batch where two transcripts fail and eight succeed returns a 200 with a
+  per-file list — never a 500 that discards eight successful digests. The BYOI
+  route is built the same way; `_ingest_result` projects its per-file statuses.
+- **Per-file upstream `error` strings are replaced, not forwarded.** They are
+  written by the digester and can name the model, a quota project, or an
+  internal host — the same rule as the 5xx translation in `_byoi_http_error`.
+  The *filename* is what the user acts on. The one upstream status that *is*
+  surfaced specifically is `503` (the BYOI has no `GEMINI_API_KEY`), because
+  that is an actionable deployment setting and a generic 502 would send the
+  operator looking at the network.
+
+Decoding limits live in `uploads.py` and are enforced before any upstream call:
+25 files, 24 MiB per file, 64 MiB per request, `.jsonl`/`.zip` only. Zip members
+are checked against their **declared** uncompressed size (reading first and
+measuring after is what makes a zip bomb work), flattened to leaf names (a
+member called `../../etc/x.jsonl` becomes `x.jsonl` — nothing here writes to
+disk, but the name reaches the digest's provenance and the session-id fallback),
+and nested archives are skipped rather than recursed so depth is never
+attacker-controlled.
+
 ## Other gotchas
 
 - **`httpx2`, not `httpx`** — same as mcp-http. An `except httpx.…` will import
   fine and then silently never match.
+- **Session ingest gets its own, much larger client timeout** (`ingest_timeout_ms`,
+  10 min) rather than raising `GEMDEX_WEB_TIMEOUT_MS` for everything. It is one
+  Gemini call per uploaded file; sharing the 30 s default would abort a
+  legitimate multi-file upload *after* the model calls were paid for.
+- **`python-multipart` is a hard dependency, not an extra** — FastAPI raises at
+  *import* time if an `UploadFile` route is declared without it, so omitting it
+  breaks the whole app, not just uploads.
+- **Never set `Content-Type` on a `FormData` fetch** (`frontend/src/api.ts`). The
+  browser sets `multipart/form-data` *with the generated boundary*; setting the
+  header by hand omits the boundary and the server cannot parse a single part.
+  `request()` special-cases `FormData` for exactly this reason.
 - **A BYOI 401/403 becomes a 502, not a 401.** It means *our* bearer is wrong, a
   server misconfiguration; relaying it would make the SPA bounce the user
   through a login that cannot fix it. Upstream 5xx text is swallowed too — it can

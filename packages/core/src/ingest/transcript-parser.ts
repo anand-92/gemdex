@@ -102,8 +102,7 @@ interface RawLine {
     record: Record<string, unknown>;
 }
 
-function readJsonlRecords(filePath: string): RawLine[] {
-    const raw = fs.readFileSync(filePath, 'utf8');
+function readJsonlRecords(raw: string): RawLine[] {
     const records: RawLine[] = [];
     for (const line of raw.split('\n')) {
         const trimmed = line.trim();
@@ -136,13 +135,36 @@ export function parseSessionFile(filePath: string, source: IngestSource): Parsed
         return parseAntigravityBinarySession(filePath);
     }
     if (!filePath.endsWith('.jsonl')) return null;
-    const records = readJsonlRecords(filePath);
+    return parseJsonlSession(fs.readFileSync(filePath, 'utf8'), {
+        source,
+        filePath,
+        sessionId: sessionIdFromFile(filePath),
+    });
+}
+
+/**
+ * Parse JSONL transcript **text** — the same dialect detection as
+ * {@link parseSessionFile} without touching the filesystem.
+ *
+ * This is the entry point for uploaded sessions (the web manager's upload view
+ * hands over bytes, not a path on the ingesting host). `sessionId` must be
+ * supplied by the caller since there is no filename to fall back on; records
+ * that carry their own id (Claude's `sessionId`, Factory's `session_start.id`,
+ * Codex's `session_meta.payload.id`) still win, which is what keeps the
+ * deterministic `chat:<source>:<sessionId>` id — and therefore upsert-on-
+ * re-upload — identical to the path-based pipeline.
+ */
+export function parseJsonlSession(
+    raw: string,
+    context: { source: IngestSource; filePath: string; sessionId: string },
+): ParsedSession | null {
+    const records = readJsonlRecords(raw);
     if (records.length === 0) return null;
 
     const parsed: ParsedSession = {
-        sessionId: sessionIdFromFile(filePath),
-        source,
-        filePath,
+        sessionId: context.sessionId,
+        source: context.source,
+        filePath: context.filePath,
         turns: [],
     };
 
@@ -230,6 +252,48 @@ export function parseSessionFile(filePath: string, source: IngestSource): Parsed
     const totalChars = parsed.turns.reduce((sum, turn) => sum + turn.text.length, 0);
     if (totalChars < MIN_SESSION_CHARS) return null;
     return parsed;
+}
+
+/** Dialect detection from the transcript's own records, plus its session id. */
+export interface DetectedSessionShape {
+    source: IngestSource;
+    /** Session id claimed by the transcript, when one of the dialects carries it. */
+    sessionId?: string;
+}
+
+/**
+ * Detect which coding agent wrote a JSONL transcript by looking at its records
+ * rather than its path. The path-based pipeline knows the dialect from the
+ * folder it scanned; an *uploaded* file has no such context, so the marker
+ * records each CLI writes are the only signal available.
+ *
+ * Markers, in the order they are decisive:
+ * - `session_meta` with `payload.id` → **Codex** (its rollout header).
+ * - `session_start` with `id` → **Factory CLI**.
+ * - a `user`/`assistant` event carrying `sessionId` → **Claude Code**.
+ *
+ * Falls back to `custom`, which parses identically — the source only picks the
+ * memory id prefix and the rendered "Source:" label, so a wrong guess costs
+ * provenance accuracy, never the ingest itself.
+ */
+export function detectJsonlSessionShape(raw: string): DetectedSessionShape {
+    for (const { record } of readJsonlRecords(raw)) {
+        const type = record.type;
+        if (type === 'session_meta') {
+            const payload = (record.payload && typeof record.payload === 'object'
+                ? record.payload : null) as Record<string, unknown> | null;
+            const id = typeof payload?.id === 'string' && payload.id ? payload.id : undefined;
+            return { source: 'codex', ...(id && { sessionId: id }) };
+        }
+        if (type === 'session_start') {
+            const id = typeof record.id === 'string' && record.id ? record.id : undefined;
+            return { source: 'factory', ...(id && { sessionId: id }) };
+        }
+        if ((type === 'user' || type === 'assistant') && typeof record.sessionId === 'string' && record.sessionId) {
+            return { source: 'claude', sessionId: record.sessionId };
+        }
+    }
+    return { source: 'custom' };
 }
 
 function parseAntigravityBinarySession(filePath: string): ParsedSession | null {

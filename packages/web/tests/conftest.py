@@ -75,6 +75,9 @@ class FakeByoi:
         self.attachment: tuple[bytes, str] | None = None
         #: Set to raise from the next call, to test error mapping.
         self.error: ByoiError | None = None
+        #: Set to script `ingest_sessions`'s per-file results; `None` means
+        #: "every forwarded file was ingested".
+        self.ingest_results: list[dict[str, Any]] | None = None
         self.health_payload: dict[str, Any] = {"ok": True}
         self.version_payload: dict[str, Any] = {
             "name": "gemdex-server",
@@ -133,6 +136,33 @@ class FakeByoi:
         """
         self._record("recall", payload)
         return [{**m, "score": 0.42} for m in self.memories]
+
+    async def ingest_sessions(self, files: list[dict[str, str]]) -> dict[str, Any]:
+        """Stand in for the BYOI's digest-and-upsert route.
+
+        Returns one `ingested` result per forwarded file by default, so tests
+        assert on what the BFF *sent* and how it projected the reply; set
+        `ingest_results` to script skips and failures.
+        """
+        self._record("ingest_sessions", files)
+        results = self.ingest_results
+        if results is None:
+            results = [
+                {
+                    "filename": file["filename"],
+                    "status": "ingested",
+                    "memoryId": f"chat:claude:{file['filename'].removesuffix('.jsonl')}",
+                    "title": "A digested session",
+                    "source": "claude",
+                }
+                for file in files
+            ]
+        return {
+            "results": results,
+            "ingested": sum(1 for r in results if r["status"] == "ingested"),
+            "skipped": sum(1 for r in results if r["status"] == "skipped"),
+            "failed": sum(1 for r in results if r["status"] == "failed"),
+        }
 
     async def read_attachment(self, memory_id: str, attachment_id: str) -> tuple[bytes, str] | None:
         self._record("read_attachment", memory_id, attachment_id)

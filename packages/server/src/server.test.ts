@@ -29,7 +29,12 @@ import {
 import type { ServerVersionInfo } from 'gemdex-core';
 import type { ServerConfig } from './config.js';
 import type { DatabasePool } from './postgres.js';
-import { createConfiguredStore, createServer } from './server.js';
+import { createConfiguredStore, createServer, type CreateServerOptions } from './server.js';
+import {
+    MAX_SESSION_FILES_PER_REQUEST,
+    SESSION_INGEST_PATH,
+    validateSessionFiles,
+} from './session-ingest.js';
 
 /**
  * Minimal in-memory MemoryBackend stub for testing the shared handler
@@ -236,7 +241,7 @@ function postgresServerConfig(): ServerConfig {
 async function withServer(
     store: MemoryBackend | null,
     fn: (base: string) => Promise<void>,
-    options: { token?: string; unsafeDevNoAuth?: boolean; allowedOrigins?: string[] } = { token: 'test-token' },
+    options: Omit<CreateServerOptions, 'store'> = { token: 'test-token' },
 ): Promise<void> {
     const server = createServer({ store, ...options });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -270,6 +275,7 @@ test('GET /v1/version returns correct shape', async () => {
             attachments: true,
             recallAttachments: true,
             importExport: true,
+            sessionIngest: true,
             auth: ['bearer'],
         });
     });
@@ -627,4 +633,188 @@ test('CORS actual requests include headers only for allowed origins', async () =
         assert.equal(disallowed.status, 403);
         assert.equal(disallowed.headers.get('access-control-allow-origin'), null);
     }, { token: 'test-token', allowedOrigins: ['https://app.example.test'] });
+});
+
+// --- POST /v1/sessions/ingest (uploaded chat sessions) ----------------------
+
+/** Enough real conversation to clear core's MIN_SESSION_CHARS. */
+const SESSION_TEXT = `Wire up the notarization pipeline. ${'detail '.repeat(40)}`;
+
+function claudeSessionJsonl(sessionId: string): string {
+    return [
+        {
+            type: 'user',
+            timestamp: '2026-05-14T15:01:32.088Z',
+            sessionId,
+            cwd: '/Users/me/agent',
+            message: { role: 'user', content: SESSION_TEXT },
+        },
+        {
+            type: 'assistant',
+            timestamp: '2026-05-14T15:02:00.000Z',
+            sessionId,
+            message: { role: 'assistant', content: [{ type: 'text', text: 'Submitted for notarization.' }] },
+        },
+    ].map((record) => JSON.stringify(record)).join('\n');
+}
+
+/**
+ * A SessionDigester stand-in. The route's contract is "digest, then upsert", so
+ * tests inject the digest step rather than calling Gemini; the store side is
+ * still the real `importRecords` path through FakeMemoryBackend.
+ */
+function fakeDigester(behavior: { title?: string; fail?: string } = {}): any {
+    return {
+        model: 'gemini-3.5-flash-lite',
+        async digest() {
+            if (behavior.fail) throw new Error(behavior.fail);
+            return {
+                title: behavior.title ?? 'Notarize the macOS app',
+                whatWasDone: 'Submitted the app for notarization.',
+                howToReproduce: ['xcrun notarytool submit app.zip'],
+                toolsAndServices: [],
+                credentialsAndConfig: [],
+                gotchas: [],
+            };
+        },
+    };
+}
+
+interface IngestSummary {
+    results: Array<{ filename: string; status: string; memoryId?: string; reason?: string; error?: string }>;
+    ingested: number;
+    skipped: number;
+    failed: number;
+}
+
+async function postIngest(base: string, body: unknown, auth = true): Promise<Response> {
+    return fetch(`${base}${SESSION_INGEST_PATH}`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            ...(auth ? { Authorization: 'Bearer test-token' } : {}),
+        },
+        body: JSON.stringify(body),
+    });
+}
+
+test('POST /v1/sessions/ingest requires the bearer token like every other data route', async () => {
+    const store = new FakeMemoryBackend();
+    await withServer(store, async (base) => {
+        const res = await postIngest(base, { files: [] }, false);
+        assert.equal(res.status, 401);
+    }, { token: 'test-token', createSessionDigester: () => fakeDigester() });
+});
+
+test('POST /v1/sessions/ingest digests an uploaded session into a deterministic chat: memory', async () => {
+    const store = new FakeMemoryBackend();
+    await withServer(store, async (base) => {
+        const res = await postIngest(base, {
+            files: [{ filename: 'claude-1.jsonl', content: claudeSessionJsonl('claude-1') }],
+        });
+        assert.equal(res.status, 200);
+        const body = await res.json() as IngestSummary;
+        assert.deepEqual(
+            { ingested: body.ingested, skipped: body.skipped, failed: body.failed },
+            { ingested: 1, skipped: 0, failed: 0 },
+        );
+        assert.equal(body.results[0].memoryId, 'chat:claude:claude-1');
+
+        // It really landed in the store, with the cleaned transcript attached.
+        const detail = await fetch(`${base}/v1/memories/${encodeURIComponent('chat:claude:claude-1')}`, {
+            headers: { Authorization: 'Bearer test-token' },
+        });
+        assert.equal(detail.status, 200);
+        const memory = (await detail.json() as { memory: Memory }).memory;
+        assert.equal(memory.title, 'Notarize the macOS app');
+        assert.equal(memory.attachments.length, 1);
+        assert.equal(memory.attachments[0].mimeType, 'text/plain');
+    }, { token: 'test-token', createSessionDigester: () => fakeDigester() });
+});
+
+test('POST /v1/sessions/ingest upserts on re-upload instead of duplicating', async () => {
+    const store = new FakeMemoryBackend();
+    await withServer(store, async (base) => {
+        const files = { files: [{ filename: 'claude-1.jsonl', content: claudeSessionJsonl('claude-1') }] };
+        assert.equal((await postIngest(base, files)).status, 200);
+        assert.equal((await postIngest(base, files)).status, 200);
+
+        const listRes = await fetch(`${base}/v1/memories`, { headers: { Authorization: 'Bearer test-token' } });
+        const { memories } = await listRes.json() as { memories: Array<{ id: string }> };
+        assert.deepEqual(memories.map((memory) => memory.id), ['chat:claude:claude-1']);
+    }, { token: 'test-token', createSessionDigester: () => fakeDigester() });
+});
+
+test('POST /v1/sessions/ingest reports a malformed file as skipped, not a 500', async () => {
+    const store = new FakeMemoryBackend();
+    await withServer(store, async (base) => {
+        const res = await postIngest(base, {
+            files: [{ filename: 'broken.jsonl', content: 'definitely not jsonl\n{' }],
+        });
+        assert.equal(res.status, 200);
+        const body = await res.json() as IngestSummary;
+        assert.equal(body.skipped, 1);
+        assert.equal(body.ingested, 0);
+        assert.equal(body.results[0].reason, 'unparseable');
+    }, { token: 'test-token', createSessionDigester: () => fakeDigester() });
+});
+
+test('POST /v1/sessions/ingest isolates a digest failure per file', async () => {
+    const store = new FakeMemoryBackend();
+    await withServer(store, async (base) => {
+        const res = await postIngest(base, {
+            files: [{ filename: 'claude-1.jsonl', content: claudeSessionJsonl('claude-1') }],
+        });
+        assert.equal(res.status, 200);
+        const body = await res.json() as IngestSummary;
+        assert.equal(body.failed, 1);
+        assert.equal(body.results[0].error, 'Gemini refused');
+    }, { token: 'test-token', createSessionDigester: () => fakeDigester({ fail: 'Gemini refused' }) });
+});
+
+test('POST /v1/sessions/ingest rejects a bad payload with 400', async () => {
+    const store = new FakeMemoryBackend();
+    await withServer(store, async (base) => {
+        assert.equal((await postIngest(base, {})).status, 400);
+        assert.equal((await postIngest(base, { files: [] })).status, 400);
+        assert.equal((await postIngest(base, { files: [{ filename: 'a.jsonl' }] })).status, 400);
+        assert.equal((await postIngest(base, { files: [{ content: 'x' }] })).status, 400);
+    }, { token: 'test-token', createSessionDigester: () => fakeDigester() });
+});
+
+test('GET /v1/sessions/ingest is 405, not a memory-id lookup', async () => {
+    const store = new FakeMemoryBackend();
+    await withServer(store, async (base) => {
+        const res = await fetch(`${base}${SESSION_INGEST_PATH}`, {
+            headers: { Authorization: 'Bearer test-token' },
+        });
+        assert.equal(res.status, 405);
+    }, { token: 'test-token', createSessionDigester: () => fakeDigester() });
+});
+
+test('POST /v1/sessions/ingest answers 503 when the server has no Gemini key', async () => {
+    const store = new FakeMemoryBackend();
+    await withServer(store, async (base) => {
+        const res = await postIngest(base, {
+            files: [{ filename: 'claude-1.jsonl', content: claudeSessionJsonl('claude-1') }],
+        });
+        assert.equal(res.status, 503);
+        const body = await res.json() as { error: string };
+        assert.match(body.error, /GEMINI_API_KEY/);
+    }, { token: 'test-token' });
+});
+
+test('validateSessionFiles strips directories from filenames and caps the batch', () => {
+    const files = validateSessionFiles({
+        files: [{ filename: '../../etc/passwd.jsonl', content: '{}' }],
+    });
+    assert.equal(files[0].filename, 'passwd.jsonl');
+
+    const tooMany = {
+        files: Array.from({ length: MAX_SESSION_FILES_PER_REQUEST + 1 }, (_unused, index) => ({
+            filename: `s${index}.jsonl`,
+            content: '{}',
+        })),
+    };
+    assert.throws(() => validateSessionFiles(tooMany), /Too many files/);
 });

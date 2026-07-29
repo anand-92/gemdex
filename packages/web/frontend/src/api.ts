@@ -61,6 +61,24 @@ export interface Session {
     loginUrl: string;
 }
 
+/** One uploaded file's outcome. Uploads always report per file, never all-or-nothing. */
+export interface SessionUploadResult {
+    filename: string | null;
+    status: 'ingested' | 'skipped' | 'failed';
+    memoryId?: string | null;
+    title?: string | null;
+    source?: string | null;
+    /** Why it was skipped or failed, already written for a human by the BFF. */
+    detail?: string | null;
+}
+
+export interface SessionUploadSummary {
+    results: SessionUploadResult[];
+    ingested: number;
+    skipped: number;
+    failed: number;
+}
+
 export interface StatusInfo {
     byoi: {
         url: string;
@@ -101,7 +119,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
             credentials: 'same-origin',
             headers: {
                 Accept: 'application/json',
-                ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+                // A FormData body must be left alone: the browser sets
+                // `multipart/form-data` *with the generated boundary*, and
+                // setting the header by hand omits the boundary, which makes
+                // the server unable to parse a single part.
+                ...(init?.body && !(init.body instanceof FormData)
+                    ? { 'Content-Type': 'application/json' }
+                    : {}),
                 ...init?.headers,
             },
         });
@@ -187,6 +211,21 @@ export const api = {
             method: 'POST',
             body: JSON.stringify({ query, limit }),
         }),
+
+    /**
+     * Upload agent session transcripts for the deployment to digest.
+     *
+     * Sent as multipart rather than JSON because these are files the user picked
+     * and a large batch would otherwise be base64-inflated by a third in
+     * transit. The digesting happens on the BYOI server (one Gemini call per
+     * session), so this request can legitimately run for minutes — callers must
+     * show progress rather than assume a fast reply.
+     */
+    uploadSessions: (files: File[]): Promise<SessionUploadSummary> => {
+        const form = new FormData();
+        for (const file of files) form.append('files', file, file.name);
+        return request<SessionUploadSummary>('/api/sessions/upload', { method: 'POST', body: form });
+    },
 
     status: (): Promise<StatusInfo> => request<StatusInfo>('/api/status'),
 

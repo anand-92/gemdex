@@ -6,6 +6,7 @@ import { CreateMemory } from './views/CreateMemory';
 import { MemoryDetail } from './views/MemoryDetail';
 import { MemoryList } from './views/MemoryList';
 import { Status } from './views/Status';
+import { UploadSessions } from './views/UploadSessions';
 
 /**
  * Shell: resolves the session once, then renders the active route.
@@ -61,6 +62,7 @@ export function App(): React.JSX.Element {
                 </a>
                 <nav>
                     <a href={href.create()}>New</a>
+                    <a href={href.upload()}>Upload sessions</a>
                     <a href={href.status()}>Status</a>
                     {session.authMode === 'google' ? (
                         <button
@@ -93,6 +95,8 @@ function renderRoute(route: ReturnType<typeof useRoute>): React.JSX.Element {
             return <MemoryDetail key={route.id} id={route.id} />;
         case 'create':
             return <CreateMemory />;
+        case 'upload':
+            return <UploadSessions />;
         case 'status':
             return <Status />;
         case 'list':

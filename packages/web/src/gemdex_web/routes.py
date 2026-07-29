@@ -17,11 +17,12 @@ from __future__ import annotations
 import re
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, Response, UploadFile
 
 from .auth import Identity, require_identity
 from .byoi import ByoiClient, ByoiError
 from .config import Config
+from .uploads import RejectedUpload, UploadError, collect_uploads
 
 router = APIRouter(prefix="/api", dependencies=[Depends(require_identity)])
 
@@ -151,8 +152,11 @@ async def create_memory(
 ) -> dict[str, Any]:
     """Create a text memory.
 
-    Attachment upload is GEM2-7: this accepts `content` and `title` only, and
-    the BYOI enforces the "content or at least one attachment" rule, so an empty
+    Text only: this accepts `content` and `title`. Files arrive through
+    `POST /sessions/upload` instead, where a transcript becomes its own digested
+    memory rather than an attachment on one the user is typing.
+
+    The BYOI enforces the "content or at least one attachment" rule, so an empty
     body surfaces as its 400 rather than a rule duplicated here.
     """
     body: dict[str, Any] = {"content": _optional_str(payload, "content") or ""}
@@ -286,6 +290,75 @@ async def read_attachment(
     )
 
 
+@router.post("/sessions/upload")
+async def upload_sessions(
+    request: Request,
+    files: Annotated[list[UploadFile], File()],
+) -> dict[str, Any]:
+    """Upload coding-agent session transcripts; the **host** cleans and digests them.
+
+    This is "path B" of chat-history ingestion. Path A is `gemdex sync-history`,
+    where a laptop digests its own sessions with its own Gemini key and pushes
+    the finished records. Here the human hands over raw transcripts and the
+    deployment does the work — so a machine that never ran the CLI, or someone
+    else's exported session, can still land in the pool.
+
+    Both paths converge on the same memory: same cleaning, same digest prompt,
+    and above all the same deterministic `chat:<source>:<sessionId>` id. That id
+    is why re-uploading a session **upserts** instead of duplicating, and why a
+    session that was already synced from a laptop is updated rather than
+    doubled.
+
+    **The digesting happens on `gemdex-server`, not here** — see `uploads.py` for
+    why. This route decodes the form (expanding zips) and forwards; it holds no
+    Gemini key and contains no ingest logic.
+
+    The response is always a per-file list. A corrupt transcript in a batch of
+    ten is that file's `failed`/`skipped` status next to nine successes, never a
+    500 that discards the whole upload — the user needs to know *which* file to
+    look at, and the successful digests are already paid for.
+    """
+    entries: list[tuple[str, bytes]] = [(file.filename or "unnamed", await file.read()) for file in files]
+
+    try:
+        uploads, rejected = collect_uploads(entries)
+    except UploadError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    try:
+        summary = await _client(request).ingest_sessions(
+            [{"filename": upload.filename, "content": upload.content} for upload in uploads]
+        )
+    except ByoiError as error:
+        # The BYOI answers 503 to this route for exactly one reason: it has no
+        # GEMINI_API_KEY, so it cannot digest. That is a fixable deployment
+        # setting, and the generic "unreachable or failed" 502 would send the
+        # operator looking at the network instead. The message is written here,
+        # not relayed, so nothing upstream can put text on the page.
+        if error.status == 503:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "The Gemdex server cannot digest sessions: it has no GEMINI_API_KEY. "
+                    "Set it in the server's environment and restart it."
+                ),
+            ) from error
+        raise _byoi_http_error(error) from error
+
+    results = [_ingest_result(result) for result in (summary.get("results") or [])]
+    # Locally rejected entries join the upstream results so the UI renders one
+    # list: from the user's side, "the zip member I gave you" and "the file the
+    # digester choked on" are the same kind of outcome.
+    results.extend(_rejected_result(entry) for entry in rejected)
+
+    return {
+        "results": results,
+        "ingested": sum(1 for result in results if result["status"] == "ingested"),
+        "skipped": sum(1 for result in results if result["status"] == "skipped"),
+        "failed": sum(1 for result in results if result["status"] == "failed"),
+    }
+
+
 @router.get("/status")
 async def status(request: Request) -> dict[str, Any]:
     """Connection/status page data: BYOI reachability, versions, and how this app is configured.
@@ -386,6 +459,51 @@ def _recall_result(result: dict[str, Any]) -> dict[str, Any]:
         # a breaking type change in the SPA.
         "score": {"fused": score} if isinstance(score, (int, float)) else None,
     }
+
+
+#: Skip reasons the BYOI reports, rendered for a human. The upstream words are
+#: internal to core's parser; these are what the person who uploaded the file
+#: needs to hear.
+_SKIP_EXPLANATIONS = {
+    "unparseable": "not a recognizable agent session transcript (no JSON records found).",
+    "trivial": "too short to be worth a digest (almost no conversation in it).",
+}
+
+
+def _ingest_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Project one BYOI per-file ingest result for the browser.
+
+    An explicit projection like every other response here, and for one extra
+    reason: an upstream `error` string is written by the digester and can name
+    the model, the store, or an internal host, so it is replaced with a fixed
+    message rather than forwarded. The *filename* is what the user acts on.
+    """
+    status = result.get("status")
+    if status not in ("ingested", "skipped", "failed"):
+        status = "failed"
+    projected: dict[str, Any] = {"filename": result.get("filename"), "status": status}
+    if status == "ingested":
+        projected["memoryId"] = result.get("memoryId")
+        projected["title"] = result.get("title")
+        projected["source"] = result.get("source")
+    elif status == "skipped":
+        reason = result.get("reason")
+        projected["detail"] = _SKIP_EXPLANATIONS.get(
+            reason if isinstance(reason, str) else "", "skipped by the ingester."
+        )
+    else:
+        projected["detail"] = "the deployment could not digest this session. Check the gemdex-server logs."
+    return projected
+
+
+def _rejected_result(entry: RejectedUpload) -> dict[str, Any]:
+    """A file this service refused before any BYOI call.
+
+    Reported as `skipped` rather than `failed` because nothing went wrong in the
+    deployment — the input was not a session transcript, or was too large. The
+    reason is ours, so unlike an upstream error it is safe to show verbatim.
+    """
+    return {"filename": entry.filename, "status": "skipped", "detail": entry.error}
 
 
 def _optional_str(payload: dict[str, Any], field: str) -> str | None:

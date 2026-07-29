@@ -35,8 +35,14 @@ def _error_message(body: Any, status: int, reason: str) -> str:
 class ByoiClient:
     """Thin `/v1` client. Construct once per process; `aclose()` on shutdown."""
 
-    def __init__(self, url: str, token: str, timeout_ms: int = 30_000) -> None:
+    def __init__(self, url: str, token: str, timeout_ms: int = 30_000, ingest_timeout_ms: int = 600_000) -> None:
         self._url = url.rstrip("/")
+        #: Session ingest is one Gemini digest call per uploaded file, so it can
+        #: run for minutes where a normal /v1 call is milliseconds. Sharing the
+        #: default timeout would abort a legitimate multi-file upload, so a much
+        #: larger budget is applied per-request instead of raising the default
+        #: for everything.
+        self._ingest_timeout_ms = ingest_timeout_ms
         self._client = httpx2.AsyncClient(
             base_url=self._url,
             headers={"Authorization": f"Bearer {token}"},
@@ -92,6 +98,23 @@ class ByoiClient:
         body = await self._request("POST", "/v1/recall", json=payload)
         return self._require_field(body, "results", "/v1/recall")
 
+    async def ingest_sessions(self, files: list[dict[str, str]]) -> dict[str, Any]:
+        """Hand uploaded transcripts to the BYOI to clean, digest, and upsert.
+
+        The BYOI is where this work happens because it is the only process that
+        has all three prerequisites at once: `gemdex-core`'s TypeScript ingest
+        pipeline, a `GEMINI_API_KEY`, and the memory store. This service is
+        Python and holds no Gemini key, so it forwards rather than reimplements —
+        the same "own no memory logic" rule as every other route here.
+
+        Digestion is one Gemini call per file, so this can take much longer than
+        a normal `/v1` call; the caller passes its own timeout.
+        """
+        body = await self._request(
+            "POST", "/v1/sessions/ingest", json={"files": files}, timeout_ms=self._ingest_timeout_ms
+        )
+        return body or {}
+
     async def read_attachment(self, memory_id: str, attachment_id: str) -> tuple[bytes, str] | None:
         """Raw attachment bytes plus their mime type, or `None` when absent."""
         path = f"/v1/memories/{_quote(memory_id)}/attachments/{_quote(attachment_id)}"
@@ -124,8 +147,9 @@ class ByoiClient:
         path: str,
         json: dict[str, Any] | None = None,
         allow_not_found: bool = False,
+        timeout_ms: int | None = None,
     ) -> dict[str, Any] | None:
-        response = await self._send(method, path, json=json)
+        response = await self._send(method, path, json=json, timeout_ms=timeout_ms)
         if allow_not_found and response.status_code == 404:
             return None
         body = _maybe_json(response)
@@ -145,9 +169,16 @@ class ByoiClient:
         path: str,
         json: dict[str, Any] | None = None,
         accept: str = "application/json",
+        timeout_ms: int | None = None,
     ) -> httpx2.Response:
         try:
-            return await self._client.request(method, path, json=json, headers={"Accept": accept})
+            return await self._client.request(
+                method,
+                path,
+                json=json,
+                headers={"Accept": accept},
+                **({"timeout": timeout_ms / 1000} if timeout_ms is not None else {}),
+            )
         except httpx2.TimeoutException as error:
             raise ByoiError(f"Gemdex Server request to {path} timed out.") from error
         except httpx2.HTTPError as error:

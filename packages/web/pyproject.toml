@@ -12,11 +12,15 @@ authors = [{ name = "Nikhil Anand" }]
 # `except` clause copied between them still matches.
 # itsdangerous backs Starlette's SessionMiddleware, which signs the session
 # cookie; it is an optional Starlette extra, so declare it explicitly.
+# python-multipart parses the session-upload form; FastAPI raises at import time
+# if an `UploadFile` route is declared without it, so it is a hard dependency
+# rather than an extra.
 dependencies = [
     "fastapi>=0.115",
     "uvicorn>=0.32",
     "httpx2>=0.28",
     "itsdangerous>=2.2",
+    "python-multipart>=0.0.32",
 ]
 
 [project.scripts]

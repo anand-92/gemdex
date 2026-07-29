@@ -51,6 +51,11 @@ cannot present a bearer token, and an agent should not be able to delete.
 that is what a backend-for-frontend is for. It is stateless (the session lives
 in the browser's cookie), so it runs read-only with no volume.
 
+It also has **no Gemini key**. Its session-upload page hands raw chat
+transcripts to `gemdex-server`, which cleans and digests them — that container is
+the only one holding the ingest pipeline, `GEMINI_API_KEY`, and the database at
+once, so the credential count is unchanged by the feature.
+
 ## The one invariant
 
 **Postgres and the BYOI are never publicly reachable.** `postgres` has no host

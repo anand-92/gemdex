@@ -439,6 +439,69 @@ button.link {
     font-weight: 600;
 }
 
+/* --- session upload ---------------------------------------------------- */
+
+.dropzone {
+    border: 2px dashed var(--border);
+    border-radius: var(--radius);
+    padding: 26px 18px;
+    text-align: center;
+    margin: 0 0 16px;
+    background: var(--panel);
+}
+
+.dropzone.dragging {
+    border-color: var(--accent);
+    background: var(--panel-hover);
+}
+
+.dropzone p {
+    margin: 0 0 12px;
+    color: var(--muted);
+}
+
+.upload-queue,
+.upload-results {
+    list-style: none;
+    margin: 0 0 16px;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.upload-queue li,
+.upload-results li {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    flex-wrap: wrap;
+    padding: 9px 13px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+
+/* A failed file is the one the user has to act on, so it is the one that gets
+   a colored edge; skips are informational and successes are self-evident. */
+.upload-results li.failed {
+    border-color: var(--danger);
+}
+
+.upload-summary h3 {
+    margin: 20px 0 10px;
+}
+
+.badge {
+    font-size: 0.72rem;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    padding: 2px 7px;
+    border-radius: 20px;
+    border: 1px solid currentcolor;
+    font-weight: 600;
+}
+
 /* --- feedback ---------------------------------------------------------- */
 
 .error {

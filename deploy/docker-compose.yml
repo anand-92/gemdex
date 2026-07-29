@@ -64,6 +64,12 @@ services:
       GEMDEX_SERVER_PORT: 8765
       GEMDEX_SERVER_TOKEN: ${GEMDEX_SERVER_TOKEN:?Set GEMDEX_SERVER_TOKEN in .env}
       GEMDEX_SERVER_DATABASE_URL: postgres://gemdex:${POSTGRES_PASSWORD}@postgres:5432/gemdex
+
+      # The ONLY container with a Gemini key, and it stays that way. It embeds
+      # on save/recall, and it is also where uploaded chat sessions are cleaned
+      # and digested (POST /v1/sessions/ingest) — this is the one process that
+      # has the ingest pipeline, the key, and the store all at once, so the web
+      # manager forwards transcripts here instead of holding a key of its own.
       GEMINI_API_KEY: ${GEMINI_API_KEY:?Set GEMINI_API_KEY in .env}
       GEMDEX_SERVER_ALLOWED_ORIGINS: ${GEMDEX_SERVER_ALLOWED_ORIGINS:-}
       GEMDEX_SERVER_UNSAFE_DEV_NO_AUTH: "false"
@@ -199,6 +205,13 @@ services:
   #
   # This service is stateless: the session is a signed cookie held by the
   # browser, so unlike mcp-http it needs no volume and no writable state dir.
+  #
+  # Note what it deliberately does NOT get: GEMINI_API_KEY. Its "Upload
+  # sessions" page (GEM2-7) hands raw chat transcripts to gemdex-server to clean
+  # and digest, because that container already has the ingest pipeline (it is
+  # TypeScript; this service is Python and cannot import it), the key, and the
+  # store. Adding Node plus a key here would put the credential in a third
+  # container to no benefit.
   gemdex-web:
     image: gemdex-web:local
     build:

@@ -6,8 +6,9 @@
  * never has to know the client-side route table — the server only ever serves
  * `/`, which also means a deep link cannot 404 after a deploy.
  *
- * **Extension point for GEM2-7 / GEM2-8:** add a variant to `Route` and a case
- * to `parseRoute`, then a branch in `App`. Nothing else needs to change.
+ * **Extension point:** add a variant to `Route` and a case to `parseRoute`, then
+ * a branch in `App`. Nothing else needs to change — `upload` was added exactly
+ * this way.
  */
 
 import { useEffect, useState } from 'react';
@@ -16,6 +17,7 @@ export type Route =
     | { name: 'list' }
     | { name: 'detail'; id: string }
     | { name: 'create' }
+    | { name: 'upload' }
     | { name: 'status' };
 
 export function parseRoute(hash: string): Route {
@@ -25,6 +27,8 @@ export function parseRoute(hash: string): Route {
     switch (head) {
         case 'new':
             return { name: 'create' };
+        case 'upload':
+            return { name: 'upload' };
         case 'status':
             return { name: 'status' };
         case 'memory': {
@@ -54,6 +58,7 @@ export const href = {
     list: (): string => '#/',
     detail: (id: string): string => `#/memory/${encodeURIComponent(id)}`,
     create: (): string => '#/new',
+    upload: (): string => '#/upload',
     status: (): string => '#/status',
 };
 

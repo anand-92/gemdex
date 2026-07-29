@@ -11,7 +11,9 @@ import { href } from '../router';
  * an operator can confirm from the app itself that (for example) `dev` mode is
  * not live in a deployment that should require login.
  *
- * **Extension point for GEM2-8:** ingest and hygiene status belong here.
+ * **Extension point for GEM2-8:** ingest and hygiene status belong here. The
+ * backend already reports `sessionIngest` in its capabilities, so this page
+ * shows whether uploads are supported by the connected server.
  */
 export function Status(): React.JSX.Element {
     const [status, setStatus] = useState<StatusInfo | null>(null);

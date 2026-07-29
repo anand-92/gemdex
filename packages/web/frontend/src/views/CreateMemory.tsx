@@ -4,10 +4,12 @@ import { api, ApiError } from '../api';
 import { href, navigate } from '../router';
 
 /**
- * Create a text memory.
+ * Create a text memory by hand.
  *
- * Text-only by scope: attachment upload is GEM2-7. When it lands, it extends
- * this form (and `POST /api/memories`) rather than replacing either.
+ * Text-only, deliberately: the file-bearing path is *session* upload
+ * (`UploadSessions`), where transcripts are digested into memories rather than
+ * attached to one the user is typing. Adding a generic attachment picker here
+ * would give two ways to put a file in the pool with different semantics.
  */
 export function CreateMemory(): React.JSX.Element {
     const [title, setTitle] = useState('');

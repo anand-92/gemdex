@@ -22,6 +22,7 @@ contract in [`docs/BYOI_REMOTE_MODE.md`](../../docs/BYOI_REMOTE_MODE.md).
 | `postgres-migrations.ts` | `MIGRATIONS`, `SqlMigration` | Versioned, checksum-verified SQL migrations. |
 | `blob-store.ts` | `createBlobStore` | Maps config → core's `FileBlobStore` / `S3BlobStore`. |
 | `embedding.ts` | `createServerEmbedding`, `MissingServerEmbedding` | Server-owned Gemini embedding, or a throwing placeholder. |
+| `session-ingest.ts` | `handleSessionIngestRequest`, `validateSessionFiles`, `SESSION_INGEST_PATH` | `POST /v1/sessions/ingest`: clean + digest + upsert uploaded chat transcripts. The one route with logic **not** in core's handler — see below. |
 
 ## Thin-server delegation (`server.ts`)
 
@@ -41,6 +42,44 @@ contract in [`docs/BYOI_REMOTE_MODE.md`](../../docs/BYOI_REMOTE_MODE.md).
 
 So this package contains **no** memory routing or business logic — only the
 mount-point plumbing around core's shared handler.
+
+## The one route that isn't core's handler: `POST /v1/sessions/ingest`
+
+`session-ingest.ts` is matched **after** the auth and store gates but **before**
+the `/v1` prefix is stripped, so it is bearer-guarded like every data route and
+core's handler never sees it.
+
+It exists because uploaded chat transcripts have to be digested *somewhere*, and
+this is the only process that already holds all three prerequisites at once:
+core's ingest pipeline (`ingestUploadedSessions`), a `GEMINI_API_KEY`, and the
+store. The caller is `packages/web`'s BFF, which is Python — it cannot import
+core, and giving it a Gemini key would put the credential in a third container.
+The full argument, including the rejected alternatives, is in
+[`../web/AGENTS.md`](../web/AGENTS.md) §7.
+
+Note what it is *not*: it is **not** in core's `handleMemoryApiRequest` and so
+is **not** part of the shared HTTP API that `gemdex serve` also mounts. That is
+deliberate — the sidecar's users have core in-process and a local ingest CLI
+already; a session-upload endpoint there would be a second way to do what
+`gemdex sync-history` does.
+
+Route shape, and the reasons for it:
+
+- **Always a per-file summary, HTTP 200.** Each file is one Gemini call, so a
+  batch where two transcripts fail and eight succeed must report eight successes
+  — a 500 would discard work already paid for. `{results, ingested, skipped,
+  failed}` with per-file `status: ingested|skipped|failed`. Core's
+  `ingestUploadedSessions` provides the per-file fault isolation.
+- **`503` when there is no Gemini key**, checked up front rather than letting
+  `MissingServerEmbedding` throw mid-batch. Digesting cannot work at all without
+  a key, and the operator needs to be told that specifically.
+- **`405` on a non-POST**, so `GET /v1/sessions/ingest` cannot fall through to
+  core and be read as a memory-id lookup.
+- **Filenames are basename-stripped in `validateSessionFiles`.** Nothing here
+  writes to disk, but a filename reaches the digest's provenance line and the
+  session-id fallback.
+- Caps: 25 files per request, 40 MiB per file. The web BFF applies its own,
+  tighter limits; these are the backstop for any other caller.
 
 ## Server-side embedding (`embedding.ts`)
 
@@ -126,7 +165,8 @@ Unauthenticated: `GET /v1/health` (`{"ok":true}`), `GET /v1/version`
 delegated to core: `GET|POST /v1/memories`, `GET|PUT|PATCH|DELETE
 /v1/memories/:id`, `GET /v1/memories/:id/attachments/:attachmentId`, `PATCH
 /v1/memories/:id/attachments` (caption-only), `POST /v1/recall`, `GET
-/v1/export`, `POST /v1/import`. Attachment bodies cap at **100 MiB** (core's
+/v1/export`, `POST /v1/import`. One bearer-guarded route is handled *here*
+rather than delegated: `POST /v1/sessions/ingest` (see above). Attachment bodies cap at **100 MiB** (core's
 `ATTACHMENT_BODY_LIMIT`). `minClientVersion` is a hardcoded compat **floor** in
 `server.ts` (`0.3.0`), bumped only when intentionally dropping older clients —
 it is **not** the server version. The compose service binds `127.0.0.1` and
@@ -137,7 +177,9 @@ uses the `pgvector/pgvector` image.
 - **`503` without a DB** — `/v1/*` data routes fail until `databaseUrl` is set;
   green `/v1/health` does **not** mean storage works.
 - **Embedding throws without a key** — server starts, but save/recall/import
-  raises `MissingServerEmbedding` (`MISSING_KEY_ERROR`).
+  raises `MissingServerEmbedding` (`MISSING_KEY_ERROR`), and
+  `POST /v1/sessions/ingest` answers `503` up front (it also needs the key to
+  *generate*, not just embed).
 - **Never edit an applied migration** — checksum mismatch blocks startup; add a
   new one.
 - **Back up DB + blob store together** — rows reference opaque blob keys.

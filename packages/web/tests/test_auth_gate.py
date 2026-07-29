@@ -45,6 +45,10 @@ PROTECTED = [
     ("POST", "/api/recall"),
     ("GET", "/api/memories/mem-1/attachments/0"),
     ("GET", "/api/status"),
+    # An upload is a write into the shared pool that costs Gemini calls, so it
+    # is gated exactly like the rest — and the 401 must land before the file is
+    # ever forwarded upstream.
+    ("POST", "/api/sessions/upload"),
 ]
 
 
