@@ -1,6 +1,6 @@
 {
     "name": "gemdex-core",
-    "version": "1.0.39",
+    "version": "1.0.40",
     "description": "Memory layer engine for AI coding agents — Gemini embeddings + embedded LanceDB hybrid retrieval",
     "main": "dist/index.js",
     "types": "dist/index.d.ts",
