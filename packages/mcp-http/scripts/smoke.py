@@ -108,8 +108,8 @@ async def run() -> int:
             assert names == [
                 "save_memory",
                 "recall",
+                "get_memory",
                 "update_memory",
-                "list_memories",
                 "report_outcome",
                 "read_attachment",
             ], f"unexpected tool surface: {names}"
@@ -142,11 +142,19 @@ async def run() -> int:
             )
             step(f"saved id {memory_id}")
 
-            recalled = await client.call_tool("recall", {"query": f"Smoke test memory {marker}", "limit": 5})
+            recalled = await client.call_tool("recall", {"query": f"Smoke test memory {marker}"})
             recalled_text = recalled.content[0].text
             assert memory_id in recalled_text, f"recall did not surface {memory_id}:\n{recalled_text}"
-            assert "Scores: fused=" in recalled_text, "recall output is missing the score line"
+            assert "titles only" in recalled_text, "recall must return the title index"
+            assert "Scores: fused=" not in recalled_text, "title-index recall must not include score lines"
             step(f"recall → {recalled_text.splitlines()[0]}")
+
+            opened = await client.call_tool("get_memory", {"id": memory_id})
+            opened_text = opened.content[0].text
+            assert f"Smoke test memory {marker}" in opened_text, (
+                f"get_memory did not return full body:\n{opened_text}"
+            )
+            step(f"get_memory → {opened_text.splitlines()[0]}")
 
             attachment = await client.call_tool("read_attachment", {"memory_id": memory_id})
             attachment_text = attachment.content[0].text
@@ -175,7 +183,7 @@ async def run() -> int:
         except asyncio.CancelledError:
             pass
 
-    print("\nPASS — save_memory → recall → read_attachment over Streamable HTTP.")
+    print("\nPASS — save_memory → recall → get_memory → read_attachment over Streamable HTTP.")
     print(f"Note: left one real memory in the pool, titled '{SMOKE_TITLE_PREFIX} …'.")
     return 0
 

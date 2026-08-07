@@ -19,7 +19,7 @@ from .auth import build_auth_provider
 from .byoi import ByoiClient
 from .config import Config, ConfigError, load_config
 from .descriptions import (
-    LIST_MEMORIES,
+    GET_MEMORY,
     READ_ATTACHMENT,
     RECALL,
     REPORT_OUTCOME,
@@ -36,10 +36,11 @@ INSTRUCTIONS = """
 Gemdex is a global, persistent memory layer for AI coding agents. Save durable
 knowledge once and recall it across every repo, session, and machine.
 
-Use `recall` proactively before solving a problem or asking the user something
-they may have already told you, and `save_memory` the moment you learn something
-reusable. `report_outcome` after acting on a recalled memory. Attachments must be
-inline base64 over this transport — local file paths refer to a different machine.
+Use `recall` proactively for a cheap title index before solving a problem or
+asking the user something they may have already told you. Open a relevant hit
+with `get_memory`. `save_memory` the moment you learn something reusable.
+`report_outcome` after acting on a fetched memory. Attachments must be inline
+base64 over this transport — local file paths refer to a different machine.
 """
 
 #: Tool registration order matches the frozen tuple in
@@ -48,8 +49,8 @@ inline base64 over this transport — local file paths refer to a different mach
 _TOOL_DESCRIPTIONS = {
     "save_memory": SAVE_MEMORY,
     "recall": RECALL,
+    "get_memory": GET_MEMORY,
     "update_memory": UPDATE_MEMORY,
-    "list_memories": LIST_MEMORIES,
     "report_outcome": REPORT_OUTCOME,
     "read_attachment": READ_ATTACHMENT,
 }

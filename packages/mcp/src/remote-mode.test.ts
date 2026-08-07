@@ -107,14 +107,14 @@ async function startFakeRemote(): Promise<{
     };
 }
 
-test('MCP public tool surface remains save_memory, recall, update_memory, list_memories, report_outcome, read_attachment', () => {
+test('MCP public tool surface remains save_memory, recall, get_memory, update_memory, report_outcome, read_attachment', () => {
     assert.deepEqual(
         [...MCP_TOOL_NAMES],
-        ['save_memory', 'recall', 'update_memory', 'list_memories', 'report_outcome', 'read_attachment'],
+        ['save_memory', 'recall', 'get_memory', 'update_memory', 'report_outcome', 'read_attachment'],
     );
 });
 
-test('remote-mode MCP handlers save, media-recall, and update through HTTP', async () => {
+test('remote-mode MCP handlers save, title-recall, get_memory, and update through HTTP', async () => {
     const remote = await startFakeRemote();
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gemdex-mcp-remote-'));
     const imagePath = path.join(tmpDir, 'example.png');
@@ -143,12 +143,17 @@ test('remote-mode MCP handlers save, media-recall, and update through HTTP', asy
         );
 
         const recalled = await handlers.handleRecall({
-            attachments: [{ path: imagePath }],
+            query: 'remote parent',
         });
         assert.equal(recalled.isError, undefined);
-        assert.match(recalled.content[0].text, /full remote parent/);
-        assert.equal(remote.requests[1].body.query, '');
-        assert.equal(remote.requests[1].body.attachments.length, 1);
+        assert.match(recalled.content[0].text, /id: remote-1/);
+        assert.ok(!recalled.content[0].text.includes('full remote parent'), 'title index must not include body');
+        assert.equal(remote.requests[1].body.query, 'remote parent');
+        assert.equal(remote.requests[1].body.limit, 10);
+
+        const opened = await handlers.handleGetMemory({ id: 'remote-1' });
+        assert.equal(opened.isError, undefined);
+        assert.match(opened.content[0].text, /full remote parent/);
 
         const updated = await handlers.handleUpdateMemory({
             id: 'remote-1',
@@ -157,8 +162,9 @@ test('remote-mode MCP handlers save, media-recall, and update through HTTP', asy
         });
         assert.equal(updated.isError, undefined);
         assert.match(updated.content[0].text, /Updated memory/);
-        assert.equal(remote.requests[2].body.content, 'updated remote parent');
-        assert.equal(remote.requests[2].body.attachments[0].path, undefined);
+        const putReq = remote.requests.find((r) => r.method === 'PUT' && r.path === '/v1/memories/remote-1');
+        assert.equal(putReq?.body.content, 'updated remote parent');
+        assert.equal(putReq?.body.attachments[0].path, undefined);
 
         // Partial edit: handler fetches the memory (GET), applies the
         // find-and-replace client-side, then PUTs the reconstructed content.
@@ -168,8 +174,8 @@ test('remote-mode MCP handlers save, media-recall, and update through HTTP', asy
         });
         assert.equal(edited.isError, undefined);
         assert.match(edited.content[0].text, /Updated memory/);
-        const getReq = remote.requests.find((r) => r.method === 'GET' && r.path === '/v1/memories/remote-1');
-        assert.ok(getReq, 'expected a GET to fetch current content before applying edits');
+        const getReqs = remote.requests.filter((r) => r.method === 'GET' && r.path === '/v1/memories/remote-1');
+        assert.ok(getReqs.length >= 2, 'expected GETs for get_memory and edit fetch');
         const lastPut = remote.requests.filter((r) => r.method === 'PUT').at(-1);
         assert.equal(lastPut?.body.content, 'partially edited remote parent');
     } finally {

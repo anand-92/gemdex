@@ -58,7 +58,7 @@ def test_search_filters_on_title_and_preview(client: TestClient, fake_byoi: Fake
     )
     body = client.get("/api/memories", params={"q": "postgres"}).json()
     # Matches the title of "a" and the preview of "c" — same fields the
-    # list_memories MCP tool filters on.
+    # Web list filter matches title + preview (literal substring).
     assert {m["id"] for m in body["memories"]} == {"a", "c"}
     assert body["total"] == 2
     assert body["poolTotal"] == 3

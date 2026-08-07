@@ -94,7 +94,7 @@ def _byoi_http_error(error: ByoiError) -> HTTPException:
 def _matches(memory: dict[str, Any], needle: str) -> bool:
     """Case-insensitive substring match over title and preview.
 
-    Same fields and same semantics as the `list_memories` MCP tool's `filter`
+    Case-insensitive substring over title + preview (literal, not semantic)
     argument, so the two surfaces agree on what "search" means literally.
     """
     return needle in (memory.get("title") or "").lower() or needle in (memory.get("preview") or "").lower()

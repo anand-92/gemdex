@@ -120,7 +120,7 @@ browser on every keystroke.
 
 Both search modes are exposed because they answer different questions: `?q=`
 finds a remembered phrase, `/api/recall` finds related meaning. The filter's
-fields (title + preview) match the `list_memories` MCP tool's `filter`, so the
+fields (title + preview) use a case-insensitive substring filter, so the
 two surfaces agree on what "search" means literally.
 
 ### 6. Responses are explicit projections, not forwarded upstream objects

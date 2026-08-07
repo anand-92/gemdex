@@ -116,17 +116,18 @@ and `CHAT_HISTORY.md` cite specific code paths — update them with the code.
 
 ## Six tools, no delete
 
-The MCP surface is `save_memory`, `recall`, `update_memory`, the read-only
-`list_memories` (browse summaries newest-first, optional substring filter — for
-orienting and getting exact ids; `recall` remains the relevance-ranked path),
-`report_outcome` (record whether a recalled memory `worked`/`failed`/`stale`
-— the outcome feedback loop; per-client stats ledger, no LanceDB writes, opt-in
-trust-weighted re-ranking via `GEMDEX_TRUST_RANKING`), and `read_attachment`
-(fetch attachment/transcript bytes as UTF-8 or base64 for a memory id — used for
-chat digests that store the full session as a non-embedded `file` blob; works
-local + remote without `GEMINI_API_KEY`). **There is no agent delete tool by
-design** — deletion is a deliberate human action (the sidecar/core
-`DELETE /memories/:id` route exists; the MCP tools deliberately don't expose it).
+The MCP surface is `save_memory`, `recall` (cheap ranked **title index**, fixed
+top 10 — never full bodies), `get_memory` (open one full parent by id — the only
+MCP path that returns body text; this is what bumps per-client recall stats),
+`update_memory`, `report_outcome` (record whether a fetched memory
+`worked`/`failed`/`stale` — the outcome feedback loop; per-client stats ledger,
+no LanceDB writes, opt-in trust-weighted title re-ranking via
+`GEMDEX_TRUST_RANKING`), and `read_attachment` (fetch attachment/transcript
+bytes as UTF-8 or base64 for a memory id — used for chat digests that store the
+full session as a non-embedded `file` blob; works local + remote without
+`GEMINI_API_KEY`). **There is no agent delete tool by design** — deletion is a
+deliberate human action (the sidecar/core `DELETE /memories/:id` route exists;
+the MCP tools deliberately don't expose it).
 
 The human delete surfaces are the desktop app and, for a self-hosted
 deployment, the web manager (`packages/web`, behind its own login and a confirm

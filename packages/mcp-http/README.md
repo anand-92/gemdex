@@ -2,7 +2,7 @@
 
 Streamable HTTP MCP transport for Gemdex. A [FastMCP](https://gofastmcp.com) v4
 service that re-exposes the six Gemdex tools — `save_memory`, `recall`,
-`update_memory`, `list_memories`, `report_outcome`, `read_attachment` — over
+`get_memory`, `update_memory`, `report_outcome`, `read_attachment` — over
 **Streamable HTTP** at `/mcp`, so remote agents can reach the memory layer over
 a URL instead of a local stdio pipe.
 

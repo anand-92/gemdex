@@ -90,11 +90,11 @@ async def test_attachment_without_data_rejected(tools: GemdexTools) -> None:
         await tools.save_memory(content="x", attachments=[{"mimeType": "image/png"}])
 
 
-# --- recall ---------------------------------------------------------------
+# --- recall (title index) -------------------------------------------------
 
 
-async def test_recall_requires_query_or_attachment(tools: GemdexTools, byoi: FakeByoi) -> None:
-    with pytest.raises(ToolError, match="provide 'query' or at least one attachment"):
+async def test_recall_requires_query(tools: GemdexTools, byoi: FakeByoi) -> None:
+    with pytest.raises(ToolError, match="'query' is required"):
         await tools.recall(query="  ")
     assert byoi.calls == []
 
@@ -104,54 +104,38 @@ async def test_recall_no_results_message(tools: GemdexTools) -> None:
     assert out == 'No memories matched "anything". Nothing stored yet, or no relevant match.'
 
 
-async def test_recall_renders_full_hit(tools: GemdexTools, byoi: FakeByoi) -> None:
-    byoi.recall_results = [hit()]
+async def test_recall_renders_title_index_only(tools: GemdexTools, byoi: FakeByoi) -> None:
+    body = "Run scripts/deploy.sh then verify /health."
+    byoi.recall_results = [hit(content=body)]
     out = await tools.recall(query="deploy")
-    assert out.startswith('Recalled 1 memory for "deploy":\n')
-    assert "### 1. Deploy steps" in out
+    assert 'Recalled 1 memory for "deploy"' in out
+    assert "titles only" in out
+    assert "1. Deploy steps" in out
     assert "id: mem-1" in out
-    assert "Scores: fused=0.5000 · dense=#1 (d=0.1200) · bm25=#2 (s=3.50)" in out
-    assert "Run scripts/deploy.sh then verify /health." in out
-    # Trust ranking off → no trust factor and no over-fetch.
-    assert "trust=" not in out
+    assert body not in out
+    assert "Scores:" not in out
+    assert "updated:" not in out
+    assert "attachments:" not in out
     assert byoi.payload_for("recall") == {"query": "deploy", "limit": 10}
 
 
-async def test_recall_summary_mode_truncates(tools: GemdexTools, byoi: FakeByoi) -> None:
-    byoi.recall_results = [hit(content="x" * 500)]
-    out = await tools.recall(query="deploy", detail="summary")
-    assert "summary mode" in out
-    assert "…" in out
-    assert "x" * 500 not in out
-
-
-async def test_recall_clamps_limit_to_50(tools: GemdexTools, byoi: FakeByoi) -> None:
-    await tools.recall(query="q", limit=500)
-    assert byoi.payload_for("recall")["limit"] == 50
-
-
-async def test_recall_attachments_line(tools: GemdexTools, byoi: FakeByoi) -> None:
-    byoi.recall_results = [
-        hit(attachments=[{"id": "transcript", "kind": "file", "caption": "Full transcript (source file)"}])
-    ]
-    out = await tools.recall(query="q")
-    assert 'attachments: file (id transcript: "Full transcript (source file)")' in out
-
-
-async def test_recall_bumps_stats_and_shows_track_record(tools: GemdexTools, byoi: FakeByoi) -> None:
+async def test_recall_does_not_bump_stats(tools: GemdexTools, byoi: FakeByoi, stats: MemoryStatsStore) -> None:
     byoi.recall_results = [hit()]
     await tools.recall(query="q")
-    out = await tools.recall(query="q")
-    assert "track record: recalled 2×" in out
+    await tools.recall(query="q")
+    assert stats.get("mem-1") is None
 
 
-async def test_recall_track_record_warns_on_failure(
+async def test_recall_track_record_when_stats_already_exist(
     tools: GemdexTools, byoi: FakeByoi, stats: MemoryStatsStore
 ) -> None:
     byoi.recall_results = [hit()]
     stats.record_outcome("mem-1", "failed")
     out = await tools.recall(query="q")
-    assert "⚠ track record: recalled 1×, failed 1× (last: failed" in out
+    assert "⚠ track record: recalled 0×, failed 1× (last: failed" in out or "⚠ track record:" in out
+    assert "failed 1×" in out
+    # Still no bump from title-index recall.
+    assert stats.get("mem-1")["recallCount"] == 0
 
 
 async def test_recall_trust_ranking_overfetches_and_reorders(
@@ -168,11 +152,46 @@ async def test_recall_trust_ranking_overfetches_and_reorders(
     for _ in range(3):
         stats.record_outcome("loser", "failed")
 
-    out = await trust_tools.recall(query="q", limit=1)
-    assert byoi.payload_for("recall")["limit"] == 6  # max(1*2, 1+5)
-    assert "### 1. Winner" in out
-    assert "Loser" not in out
-    assert "trust=×" in out
+    out = await trust_tools.recall(query="q")
+    # Fixed N=10 → over-fetch min(max(20, 15), 100) = 20
+    assert byoi.payload_for("recall")["limit"] == 20
+    assert "1. Winner" in out
+    winner_pos = out.index("id: winner")
+    loser_pos = out.index("id: loser")
+    assert winner_pos < loser_pos
+    assert "trust=×" not in out  # title index does not render the factor
+
+
+# --- get_memory -----------------------------------------------------------
+
+
+async def test_get_memory_requires_id(tools: GemdexTools, byoi: FakeByoi) -> None:
+    with pytest.raises(ToolError, match="'id' is required"):
+        await tools.get_memory(id="  ")
+    assert byoi.calls == []
+
+
+async def test_get_memory_not_found(tools: GemdexTools, byoi: FakeByoi) -> None:
+    byoi.get_result = None
+    with pytest.raises(ToolError, match="Memory not found: missing"):
+        await tools.get_memory(id="missing")
+
+
+async def test_get_memory_returns_full_body_and_bumps_stats(
+    tools: GemdexTools, byoi: FakeByoi, stats: MemoryStatsStore
+) -> None:
+    byoi.get_result = make_memory(
+        content="Run scripts/deploy.sh then verify /health.",
+        attachments=[{"id": "transcript", "kind": "file", "caption": "Full transcript (source file)"}],
+        updatedAt=0,
+    )
+    out = await tools.get_memory(id="mem-1")
+    assert "Deploy steps" in out
+    assert "id: mem-1" in out
+    assert "updated:" in out
+    assert 'attachments: file (id transcript: "Full transcript (source file)")' in out
+    assert "Run scripts/deploy.sh then verify /health." in out
+    assert stats.get("mem-1")["recallCount"] == 1
 
 
 # --- update_memory -------------------------------------------------------
@@ -232,55 +251,6 @@ async def test_update_edits_replace_all(tools: GemdexTools, byoi: FakeByoi) -> N
 async def test_update_edits_rejects_bad_shape(tools: GemdexTools) -> None:
     with pytest.raises(ToolError, match="string 'oldText' and 'newText'"):
         await tools.update_memory(id="mem-1", edits=[{"oldText": 1, "newText": "b"}])
-
-
-# --- list_memories -------------------------------------------------------
-
-
-async def test_list_empty(tools: GemdexTools) -> None:
-    assert await tools.list_memories() == "No memories. Nothing stored yet."
-
-
-async def test_list_renders_entries(tools: GemdexTools, byoi: FakeByoi) -> None:
-    byoi.list_result = [
-        {"id": "a", "title": "Alpha", "preview": "alpha preview", "attachments": [], "updatedAt": 0},
-        {
-            "id": "b",
-            "title": "Beta",
-            "preview": "beta preview",
-            "attachments": [{"kind": "image"}, {"kind": "image"}],
-            "updatedAt": 0,
-        },
-    ]
-    out = await tools.list_memories()
-    assert out.startswith("2 memories (newest first):\n")
-    assert "1. Alpha" in out
-    assert "id: a · updated" in out
-    assert " · 2 images" in out
-
-
-async def test_list_filter_is_literal_substring(tools: GemdexTools, byoi: FakeByoi) -> None:
-    byoi.list_result = [
-        {"id": "a", "title": "Alpha", "preview": "", "attachments": [], "updatedAt": 0},
-        {"id": "b", "title": "Beta", "preview": "", "attachments": [], "updatedAt": 0},
-    ]
-    out = await tools.list_memories(filter="BET")
-    assert '1 memory matching "bet"' in out
-    assert "Alpha" not in out
-
-
-async def test_list_no_filter_match_suggests_recall(tools: GemdexTools, byoi: FakeByoi) -> None:
-    byoi.list_result = [{"id": "a", "title": "Alpha", "preview": "", "attachments": [], "updatedAt": 0}]
-    out = await tools.list_memories(filter="zzz")
-    assert "Try a different filter or recall with a natural-language query." in out
-
-
-async def test_list_truncation_note(tools: GemdexTools, byoi: FakeByoi) -> None:
-    byoi.list_result = [
-        {"id": str(i), "title": f"T{i}", "preview": "", "attachments": [], "updatedAt": 0} for i in range(5)
-    ]
-    out = await tools.list_memories(limit=2)
-    assert "(3 more not shown — raise 'limit' or narrow 'filter')" in out
 
 
 # --- report_outcome ------------------------------------------------------

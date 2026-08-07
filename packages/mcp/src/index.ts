@@ -55,63 +55,38 @@ rather than leaving both.
 `;
 
 const RECALL_DESCRIPTION = `
-Retrieve memories from the user's global memory layer by natural-language query
-and/or inline media (image / audio / video / PDF).
+Search the user's global memory layer by natural-language query and return a
+cheap ranked title index (never full bodies).
 
 🎯 **When to use**: proactively and by default — make checking memory a reflex,
 not something you wait to be told to do. Recall at the start of a task, before
 solving a problem, before setting up a tool or environment, before making a
 design/convention decision, and before asking the user for information they may
-have already given you. Explicit prompts ("check your memory layer", "how do we
-usually do X", "what were those credentials", "find the memory that matches this
-screenshot") are just some of the triggers; a quick recall is cheap and often
-surfaces prior work, so prefer checking first over assuming nothing is stored.
+have already given you. A title-index recall is cheap; prefer checking first
+over assuming nothing is stored.
 
-Behavior: hybrid semantic + BM25 search over text, plus a media-similarity
-branch for each query attachment, fused by relevance. Returns the FULL matching
-memories (never fragments). A query attachment is either a local file \`path\`
-(preferred — the server reads + encodes the bytes) or inline base64 \`data\`.
-Either \`query\` or at least one attachment is required; recall-by-media requires
-the gemini-embedding-2 model.
+Behavior: hybrid semantic + BM25 search, fused by relevance. Always returns up
+to 10 hits as title + id only (plus a track-record line when outcome stats
+exist). Most tasks end here with nothing useful — that is expected. When a
+title looks clearly task-relevant, open THAT memory with \`get_memory({ id })\`.
+Do not expect bodies from this tool.
 
-Each hit reports its relative age (\`updated: …\`) and any attachments
-(\`kind (id …)\`) so you can judge freshness and know media exists; fetch
-attachment bytes from the desktop sidecar at
-\`GET /memories/:id/attachments/:attachmentId\`. Pass \`detail: "summary"\` to
-get title + preview + score only (cheap to scan many hits), then re-run with
-\`detail: "full"\` (the default) for the complete content you need.
-
-When available, each hit also shows a "track record" line (recalled/worked/
-failed/stale counts from prior \`report_outcome\` calls) so you can judge how
-trustworthy this memory has been in practice — a \`⚠\` prefix means it has
-failed or gone stale before. Setting \`GEMDEX_TRUST_RANKING=true\` additionally
-re-ranks results by that track record (off by default; ranking stays pure
-relevance until you opt in).
-
-Chat digests often attach the full session as a non-embedded \`file\` attachment
-(caption "Full transcript (source file)"). Prefer \`read_attachment\` with the
-memory id to fetch that transcript over HTTP (works in remote/BYOI mode with no
-local path and no GEMINI_API_KEY). When a "Full transcript:" filesystem path is
-present and the file exists on this machine, reading that path is also fine.
-Treat the transcript as supporting evidence for exact prior code, commands, or
-session details when the digest summary is not enough.
+Setting \`GEMDEX_TRUST_RANKING=true\` re-ranks the title index by track record
+(off by default; ranking stays pure relevance until you opt in).
 `;
 
-const LIST_MEMORIES_DESCRIPTION = `
-Browse the user's global memory layer: list stored memories newest-first, each
-as a compact title + id + relative age + preview (no embedding/search).
+const GET_MEMORY_DESCRIPTION = `
+Load the full content of one stored memory by id.
 
-🎯 **When to use**: whenever you want to orient yourself in what's stored — when
-the user asks ("what do you have in memory?", "list your memories about
-deploys") and also proactively, e.g. to get a memory's exact \`id\` for
-\`update_memory\` when a fuzzy \`recall\` isn't precise, or to scan what already
-exists before saving something new. Use it freely; you don't need the user to
-point you at the memory layer first.
+🎯 **When to use**: after \`recall\` returns a title that looks clearly relevant
+to the current task — or when you already have an exact id from \`save_memory\`.
+This is the only MCP path that returns the full parent body. Most recalls need
+no follow-up; only open memories you actually intend to use.
 
-Behavior: returns lightweight summaries (content truncated to a preview), not
-full content — use \`recall\` for relevance-ranked full memories. Optional
-\`filter\` is a case-insensitive substring matched against title + preview (a
-literal filter, NOT semantic search). \`limit\` defaults to 50 (max 200).
+Behavior: returns title, id, relative age, optional track-record and attachment
+metadata, and the full content. Use \`read_attachment\` afterward if you need
+attachment/transcript bytes. Opening a memory counts as a recall for the
+per-client outcome ledger (feeds track-record / optional trust ranking).
 `;
 
 const UPDATE_MEMORY_DESCRIPTION = `
@@ -123,7 +98,7 @@ outdated, wrong, or duplicated — not only when the user asks
 fact, or a \`save_memory\` response flags "⚠ similar existing memories already
 stored", prefer correcting/consolidating the existing memory in place over
 leaving stale or conflicting copies. Get the id from a prior save_memory,
-recall, or list_memories result.
+recall, or get_memory result.
 
 Two ways to change the text:
 - \`edits\`: targeted find-and-replace — preferred for large memories. Pass an
@@ -162,8 +137,8 @@ burned the agent rank lower.
 const READ_ATTACHMENT_DESCRIPTION = `
 Read the bytes of an attachment on a stored memory as text (UTF-8) or base64.
 
-🎯 **When to use**: after \`recall\` / \`list_memories\` shows a memory with
-attachments — especially chat digests that include a \`file\` attachment captioned
+🎯 **When to use**: after \`get_memory\` shows a memory with attachments —
+especially chat digests that include a \`file\` attachment captioned
 "Full transcript (source file)". Prefer this over opening a local path when
 running in remote mode (BYOI): the bytes live in the server blob store and are
 fetched over HTTP. No GEMINI_API_KEY required.
@@ -174,8 +149,8 @@ exactly one attachment, or a single transcript/\`file\` attachment), optional
 `;
 
 // JSON-schema fragment for the optional media array shared by save_memory /
-// recall / update_memory. Each item is EITHER a local file `path` (preferred
-// for agents — the server reads + base64-encodes it, so no megabytes of base64
+// update_memory. Each item is EITHER a local file `path` (preferred for
+// agents — the server reads + base64-encodes it, so no megabytes of base64
 // land in tool-call args) OR inline base64 `data`.
 const ATTACHMENTS_SCHEMA = {
     type: "array",
@@ -258,34 +233,35 @@ class GemdexMemoryServer {
                         properties: {
                             query: {
                                 type: "string",
-                                description: "Natural-language description of what to recall. Optional when attachments are provided.",
+                                description: "Natural-language description of what to recall.",
                             },
-                            limit: {
-                                type: "number",
-                                description: "Max number of memories to return.",
-                                default: 10,
-                                maximum: 50,
-                            },
-                            detail: {
-                                type: "string",
-                                enum: ["summary", "full"],
-                                description: "'full' (default) returns each memory's complete content; 'summary' returns only a short preview per hit — cheaper to scan many results before pulling full content.",
-                                default: "full",
-                            },
-                            attachments: ATTACHMENTS_SCHEMA,
                         },
-                        required: [],
+                        required: ["query"],
                     },
                 },
                 {
                     name: MCP_TOOL_NAMES[2],
+                    description: GET_MEMORY_DESCRIPTION,
+                    inputSchema: {
+                        type: "object",
+                        properties: {
+                            id: {
+                                type: "string",
+                                description: "The id of the memory to open (from recall or save_memory).",
+                            },
+                        },
+                        required: ["id"],
+                    },
+                },
+                {
+                    name: MCP_TOOL_NAMES[3],
                     description: UPDATE_MEMORY_DESCRIPTION,
                     inputSchema: {
                         type: "object",
                         properties: {
                             id: {
                                 type: "string",
-                                description: "The id of the memory to revise (from save_memory or recall).",
+                                description: "The id of the memory to revise (from save_memory, recall, or get_memory).",
                             },
                             content: {
                                 type: "string",
@@ -324,26 +300,6 @@ class GemdexMemoryServer {
                     },
                 },
                 {
-                    name: MCP_TOOL_NAMES[3],
-                    description: LIST_MEMORIES_DESCRIPTION,
-                    inputSchema: {
-                        type: "object",
-                        properties: {
-                            filter: {
-                                type: "string",
-                                description: "Optional case-insensitive substring matched against each memory's title and preview (literal, not semantic). Omit to list everything.",
-                            },
-                            limit: {
-                                type: "number",
-                                description: "Max number of memories to return.",
-                                default: 50,
-                                maximum: 200,
-                            },
-                        },
-                        required: [],
-                    },
-                },
-                {
                     name: MCP_TOOL_NAMES[4],
                     description: REPORT_OUTCOME_DESCRIPTION,
                     inputSchema: {
@@ -351,7 +307,7 @@ class GemdexMemoryServer {
                         properties: {
                             id: {
                                 type: "string",
-                                description: "The id of the memory you acted on (from a prior save_memory or recall result).",
+                                description: "The id of the memory you acted on (from a prior get_memory or save_memory result).",
                             },
                             outcome: {
                                 type: "string",
@@ -374,7 +330,7 @@ class GemdexMemoryServer {
                         properties: {
                             memory_id: {
                                 type: "string",
-                                description: "Id of the parent memory (from save_memory, recall, or list_memories).",
+                                description: "Id of the parent memory (from save_memory, recall, or get_memory).",
                             },
                             attachment_id: {
                                 type: "string",
@@ -399,9 +355,9 @@ class GemdexMemoryServer {
                 case MCP_TOOL_NAMES[1]:
                     return await this.handlers.handleRecall(args);
                 case MCP_TOOL_NAMES[2]:
-                    return await this.handlers.handleUpdateMemory(args);
+                    return await this.handlers.handleGetMemory(args);
                 case MCP_TOOL_NAMES[3]:
-                    return await this.handlers.handleListMemories(args);
+                    return await this.handlers.handleUpdateMemory(args);
                 case MCP_TOOL_NAMES[4]:
                     return await this.handlers.handleReportOutcome(args);
                 case MCP_TOOL_NAMES[5]:

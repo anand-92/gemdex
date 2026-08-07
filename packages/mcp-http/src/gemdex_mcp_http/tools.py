@@ -22,25 +22,22 @@ from .descriptions import ATTACHMENTS_FIELD
 from .formatting import (
     DEFAULT_READ_ATTACHMENT_MAX_CHARS,
     apply_content_edits,
-    format_attachment_counts,
     format_attachments_line,
     format_memory_result,
     format_relative_age,
     format_similar_block,
-    format_sub_scores_line,
     format_track_record_line,
     is_textish_mime,
-    make_preview,
     now_ms,
     pick_default_attachment_id,
     trust_multiplier,
 )
 from .stats import MemoryStatsStore
 
-RECALL_MAX_LIMIT = 50
-RECALL_DEFAULT_LIMIT = 10
-LIST_DEFAULT_LIMIT = 50
-LIST_MAX_LIMIT = 200
+#: Fixed top-N for the title-index `recall` tool. No agent-facing limit param.
+RECALL_FIXED_LIMIT = 10
+#: Cap for trust-ranking over-fetch (well above fixed N so re-ranking has room).
+RECALL_OVERFETCH_CAP = 100
 
 AttachmentList = Annotated[list[dict[str, Any]] | None, Field(default=None, description=ATTACHMENTS_FIELD)]
 
@@ -153,89 +150,89 @@ class GemdexTools:
     async def recall(
         self,
         query: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description=(
-                    "Natural-language description of what to recall. Optional when attachments are provided."
-                ),
-            ),
-        ] = None,
-        limit: Annotated[
-            int, Field(default=RECALL_DEFAULT_LIMIT, description="Max number of memories to return.", le=RECALL_MAX_LIMIT)
-        ] = RECALL_DEFAULT_LIMIT,
-        detail: Annotated[
-            Literal["summary", "full"],
-            Field(
-                default="full",
-                description=(
-                    "'full' (default) returns each memory's complete content; 'summary' returns only a "
-                    "short preview per hit — cheaper to scan many results before pulling full content."
-                ),
-            ),
-        ] = "full",
-        attachments: AttachmentList = None,
+            str,
+            Field(description="Natural-language description of what to recall."),
+        ],
     ) -> str:
-        text = query or ""
-        resolved = _validate_attachments(attachments)
-        if not text.strip() and not resolved:
-            raise ToolError("Error: provide 'query' or at least one attachment.")
+        text = (query or "").strip()
+        if not text:
+            raise ToolError("Error: 'query' is required.")
 
-        effective_limit = min(limit, RECALL_MAX_LIMIT) if limit > 0 else RECALL_DEFAULT_LIMIT
-        label = f'"{query}"' if text.strip() else "the supplied media"
-
-        # Flag off: fetch exactly `limit`, no re-rank — byte-identical to the
-        # backend's own order. Flag on: over-fetch so re-ranking has room to
-        # promote a proven memory or demote a burned one past the raw cutoff.
+        label = f'"{text}"'
+        # Flag off: fetch exactly N. Flag on: over-fetch so re-ranking has room.
         fetch_limit = (
-            min(max(effective_limit * 2, effective_limit + 5), RECALL_MAX_LIMIT)
+            min(max(RECALL_FIXED_LIMIT * 2, RECALL_FIXED_LIMIT + 5), RECALL_OVERFETCH_CAP)
             if self._trust_ranking
-            else effective_limit
+            else RECALL_FIXED_LIMIT
         )
         payload: dict[str, Any] = {"query": text, "limit": fetch_limit}
-        if resolved:
-            payload["attachments"] = resolved
 
         fetched = await self._call("recall memories", self._client.recall(payload))
-        results = self._apply_trust_ranking(fetched)[:effective_limit] if self._trust_ranking else fetched
+        results = (
+            self._apply_trust_ranking(fetched)[:RECALL_FIXED_LIMIT]
+            if self._trust_ranking
+            else fetched
+        )
         if not results:
             return f"No memories matched {label}. Nothing stored yet, or no relevant match."
 
-        # Telemetry only — a stats-store failure must never break recall.
+        # Title-index only — opening via get_memory is what counts as a recall.
+        now = now_ms()
+        blocks = []
+        for index, result in enumerate(results):
+            lines = [
+                f"{index + 1}. {result.get('title')}",
+                f"   id: {result['id']}",
+            ]
+            track_record = format_track_record_line(self._safe_get_stats(result["id"]), now)
+            if track_record:
+                lines.append(f"   {track_record}")
+            blocks.append("\n".join(lines))
+
+        noun = "memory" if len(results) == 1 else "memories"
+        header = (
+            f"Recalled {len(results)} {noun} for {label} "
+            "(titles only — call get_memory with an id to open full content):\n"
+        )
+        return header + "\n" + "\n\n".join(blocks)
+
+    # --- get_memory -------------------------------------------------------
+
+    async def get_memory(
+        self,
+        id: Annotated[
+            str,
+            Field(description="The id of the memory to open (from recall or save_memory)."),
+        ],
+    ) -> str:
+        memory_id = (id or "").strip()
+        if not memory_id:
+            raise ToolError("Error: 'id' is required.")
+
+        memory = await self._call("get memory", self._client.get(memory_id))
+        if memory is None:
+            raise ToolError(f"Failed to get memory: Memory not found: {memory_id}")
+
+        # Telemetry only — a stats-store failure must never break get_memory.
         try:
-            self._stats.record_recall([r["id"] for r in results])
+            self._stats.record_recall([memory_id])
         except Exception:  # noqa: BLE001 - telemetry is never a point of failure
             pass
 
         now = now_ms()
-        blocks = []
-        for index, result in enumerate(results):
-            stats = self._safe_get_stats(result["id"])
-            trust = trust_multiplier(stats) if self._trust_ranking else None
-            lines = [
-                f"### {index + 1}. {result.get('title')}",
-                f"id: {result['id']}",
-                f"updated: {format_relative_age(result.get('updatedAt', 0), now)}",
-                format_sub_scores_line(result.get("score", 0), result.get("subScores"), trust),
-            ]
-            track_record = format_track_record_line(stats, now)
-            if track_record:
-                lines.append(track_record)
-            attachments_line = format_attachments_line(result.get("attachments"))
-            if attachments_line:
-                lines.append(attachments_line)
-            body = result.get("content", "")
-            lines.extend(["", make_preview(body) if detail == "summary" else body])
-            blocks.append("\n".join(lines))
-
-        detail_note = (
-            ' (summary mode — re-run recall with a tighter query or detail:"full" for complete content)'
-            if detail == "summary"
-            else ""
-        )
-        noun = "memory" if len(results) == 1 else "memories"
-        header = f"Recalled {len(results)} {noun} for {label}{detail_note}:\n"
-        return header + "\n" + "\n\n---\n\n".join(blocks)
+        lines = [
+            memory.get("title") or "",
+            f"id: {memory.get('id', memory_id)}",
+            f"updated: {format_relative_age(memory.get('updatedAt', 0), now)}",
+        ]
+        track_record = format_track_record_line(self._safe_get_stats(memory_id), now)
+        if track_record:
+            lines.append(track_record)
+        attachments_line = format_attachments_line(memory.get("attachments"))
+        if attachments_line:
+            lines.append(attachments_line)
+        lines.extend(["", memory.get("content") or ""])
+        return "\n".join(lines)
 
     def _apply_trust_ranking(self, hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Re-rank over-fetched hits by `score * trustMultiplier(stats)`.
@@ -261,7 +258,7 @@ class GemdexTools:
     async def update_memory(
         self,
         id: Annotated[
-            str, Field(description="The id of the memory to revise (from save_memory or recall).")
+            str, Field(description="The id of the memory to revise (from save_memory, recall, or get_memory).")
         ],
         content: Annotated[
             str | None,
@@ -325,75 +322,13 @@ class GemdexTools:
         memory = await self._call("update memory", self._client.update(id, payload))
         return format_memory_result("Updated", memory)
 
-    # --- list_memories ----------------------------------------------------
-
-    async def list_memories(
-        self,
-        filter: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description=(
-                    "Optional case-insensitive substring matched against each memory's title and "
-                    "preview (literal, not semantic). Omit to list everything."
-                ),
-            ),
-        ] = None,
-        limit: Annotated[
-            int,
-            Field(default=LIST_DEFAULT_LIMIT, description="Max number of memories to return.", le=LIST_MAX_LIMIT),
-        ] = LIST_DEFAULT_LIMIT,
-    ) -> str:
-        effective_limit = min(limit, LIST_MAX_LIMIT) if limit > 0 else LIST_DEFAULT_LIMIT
-        needle = (filter or "").strip().lower()
-
-        all_memories = await self._call("list memories", self._client.list())
-        matched = (
-            [
-                m
-                for m in all_memories
-                if needle in (m.get("title") or "").lower() or needle in (m.get("preview") or "").lower()
-            ]
-            if needle
-            else all_memories
-        )
-        if not matched:
-            scope = f' matching "{needle}"' if needle else ""
-            tail = (
-                "Nothing stored yet."
-                if not all_memories
-                else "Try a different filter or recall with a natural-language query."
-            )
-            return f"No memories{scope}. {tail}"
-
-        shown = matched[:effective_limit]
-        now = now_ms()
-        lines = []
-        for index, memory in enumerate(shown):
-            age = format_relative_age(memory.get("updatedAt", 0), now)
-            media = format_attachment_counts(memory.get("attachments"))
-            lines.append(
-                f"{index + 1}. {memory.get('title')}\n"
-                f"   id: {memory.get('id')} · updated {age}{media}\n"
-                f"   {memory.get('preview')}"
-            )
-        filter_note = f' matching "{needle}"' if needle else ""
-        truncated = (
-            f"\n\n({len(matched) - len(shown)} more not shown — raise 'limit' or narrow 'filter')"
-            if len(matched) > len(shown)
-            else ""
-        )
-        noun = "memory" if len(matched) == 1 else "memories"
-        header = f"{len(matched)} {noun}{filter_note} (newest first):\n"
-        return header + "\n" + "\n\n".join(lines) + truncated
-
     # --- report_outcome ---------------------------------------------------
 
     async def report_outcome(
         self,
         id: Annotated[
             str,
-            Field(description="The id of the memory you acted on (from a prior save_memory or recall result)."),
+            Field(description="The id of the memory you acted on (from a prior get_memory or save_memory result)."),
         ],
         outcome: Annotated[
             Literal["worked", "failed", "stale"],
@@ -440,7 +375,7 @@ class GemdexTools:
     async def read_attachment(
         self,
         memory_id: Annotated[
-            str, Field(description="Id of the parent memory (from save_memory, recall, or list_memories).")
+            str, Field(description="Id of the parent memory (from save_memory, recall, or get_memory).")
         ],
         attachment_id: Annotated[
             str | None,

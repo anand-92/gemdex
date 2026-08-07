@@ -133,46 +133,45 @@ and reads on command.
 ```markdown
 ## Memory layer (Gemdex)
 
-`gemdex` MCP exposes `save_memory`, `recall`, `update_memory`, and the
-read-only `list_memories` — a global, durable memory store shared across every
-repo and session. EXPLICIT ONLY:
+`gemdex` MCP exposes `save_memory`, `recall`, `get_memory`, `update_memory`,
+`report_outcome`, and `read_attachment` — a global, durable memory store shared
+across every repo and session.
 
-- `save_memory(content, title?)` when the user says remember/save to memory.
-- `recall(query, limit?)` when the user points at memory ("check your memory
-  layer", "how do we usually do X", "where are the … credentials"). Returns
-  full memories, never fragments.
+- `recall(query)` freely / by default at the start of a task. Returns a cheap
+  ranked **title index** (top 10: title + id only). Most recalls need no follow-up.
+- `get_memory(id)` only when a title looks clearly task-relevant — the only path
+  that returns full body text.
+- `save_memory(content, title?)` when you learn something durable and reusable.
 - `update_memory(id, content?, edits?, title?)` to revise a stored memory —
-  `edits` for a targeted find-and-replace (change part of a large memory without
-  resending it), or `content` for a full rewrite.
-- `list_memories(filter?, limit?)` to browse stored memories or get an exact
-  `id`, when a fuzzy `recall` isn't precise enough.
-- `report_outcome(id, outcome, note?)` right after you act on a recalled memory
-  and the result is clear (`worked` / `failed` / `stale`) — this is the one
-  gemdex tool to call without being asked, whenever a clear outcome exists.
+  `edits` for a targeted find-and-replace, or `content` for a full rewrite.
+- `report_outcome(id, outcome, note?)` right after you act on a fetched memory
+  and the result is clear (`worked` / `failed` / `stale`).
+- `read_attachment(memory_id, …)` for transcript/attachment bytes after
+  `get_memory` shows media.
 
-Never auto-capture a session and never recall unprompted. There's no delete
-tool — deletion is a human action in the Gemdex desktop app. If these tools
-aren't in your toolset, the MCP isn't connected.
+There's no delete tool — deletion is a human action in the Gemdex desktop app
+or web manager. If these tools aren't in your toolset, the MCP isn't connected.
 ```
 
 **For Codex CLI, Cursor, Windsurf, Cline, Continue, Zed** — paste the same
 snippet into your client's root instructions file (conventionally `AGENTS.md`).
 
-## The 5 MCP tools
+## The 6 MCP tools
 
 | Tool | Input | Returns | When the agent calls it |
 |------|-------|---------|-------------------------|
-| `save_memory` | `content` and/or `attachments`, `title` (optional) | new `id` + resolved title (+ a ⚠ similar-memories warning when a near-duplicate is already stored) | only when told to remember/save |
-| `recall` | `query` and/or `attachments` (at least one required), `limit` (optional, ~10) | full memories ranked by relevance, each with a track-record line | only when pointed at memory |
+| `save_memory` | `content` and/or `attachments`, `title` (optional) | new `id` + resolved title (+ a ⚠ similar-memories warning when a near-duplicate is already stored) | when learning something durable/reusable |
+| `recall` | `query` (required) | top 10 titles + ids ranked by relevance (+ track-record when stats exist) | freely / by default before work — cheap title index, never bodies |
+| `get_memory` | `id` (required) | full parent body (+ age, attachments metadata, track-record) | only when a `recall` title is clearly task-relevant |
 | `update_memory` | `id` (required); `content` **or** `edits`, `title`, `attachments` (optional — at least one required) | updated `id` + title | to revise a stored memory (`edits` = partial find-and-replace; `content` = full rewrite) |
-| `list_memories` | `filter` (optional substring), `limit` (optional, ~50) | newest-first summaries (title, id, age, preview) | to browse, or to get an exact `id` for `update_memory` |
-| `report_outcome` | `id` (required), `outcome` (`worked`\|`failed`\|`stale`, required), `note` (optional) | confirmation + updated track record | right after acting on a recalled memory, whenever the outcome is clear |
+| `report_outcome` | `id` (required), `outcome` (`worked`\|`failed`\|`stale`, required), `note` (optional) | confirmation + updated track record | right after acting on a fetched memory, whenever the outcome is clear |
+| `read_attachment` | `memory_id` (required); `attachment_id`, `max_chars` (optional) | attachment bytes as UTF-8 or base64 | after `get_memory` shows attachments (e.g. chat transcripts) |
 
 Deletion is intentionally **not** an agent tool — it's a deliberate human action
-in the desktop app. All five tools embed via Gemini where embedding applies
-(`report_outcome` and `list_memories` don't embed — they read/write local
-state only). Local mode requires `GEMINI_API_KEY`; remote mode uses the Gemdex
-Server owner's key.
+in the desktop app or web manager. Embeddings apply where content is written or
+searched (`get_memory`, `report_outcome`, and `read_attachment` don't embed).
+Local mode requires `GEMINI_API_KEY`; remote mode uses the Gemdex Server owner's
+key.
 
 ### Multimodal attachments
 
@@ -426,7 +425,7 @@ console.log(hits[0].content); // the full memory, never a fragment
 | Package | Description |
 |---------|-------------|
 | [`gemdex-core`](packages/core) | Memory store (parent-document chunking), Gemini embedding client, embedded LanceDB hybrid retrieval |
-| [`gemdex-mcp`](packages/mcp) | MCP server (`save_memory`/`recall`/`update_memory`/`list_memories`/`report_outcome`) + `gemdex serve` localhost sidecar |
+| [`gemdex-mcp`](packages/mcp) | MCP server (`save_memory`/`recall`/`get_memory`/`update_memory`/`report_outcome`/`read_attachment`) + `gemdex serve` localhost sidecar |
 | [`gemdex-server`](packages/server) | Self-hosted BYOI HTTP backend using Postgres/pgvector and file or S3-compatible blobs |
 | [`gemdex-mcp-http`](packages/mcp-http) | Python. Streamable HTTP MCP endpoint (`/mcp`) for remote agents; OAuth 2.1 single-user auth |
 | [`gemdex-web`](packages/web) | Python + React. Browser manager for a self-hosted pool: Google login, CRUD, session upload, hygiene |

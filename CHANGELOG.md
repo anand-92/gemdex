@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Changed
+- **Breaking MCP tool contract: title-index `recall` + `get_memory`, drop `list_memories`.** Coding agents call `recall` freely before every task; dumping full parent bodies on every hit was wasting context. The agent surface is now:
+  - `recall({ query })` — required text query only; always returns the top **10** hits as **title + id** (plus a track-record line when stats already exist). No `limit`, no `detail`, no media attachments on recall. Never returns bodies.
+  - `get_memory({ id })` — the only MCP path that returns a full parent body (title, age, attachments metadata, content). Opening a memory is what bumps per-client `recallCount` / track-record (title-index hits do not).
+  - `list_memories` removed from both stdio MCP and HTTP MCP (web manager browse is unchanged).
+  - Final six tools: `save_memory`, `recall`, `get_memory`, `update_memory`, `report_outcome`, `read_attachment`. No delete (unchanged).
+  - Core/BYOI `/v1/recall` is unchanged (still returns full content for web/desktop); this is an MCP presentation change only.
+  - Mirrored 1:1 on `gemdex-mcp` and `gemdex-mcp-http`.
+
 ### Added
 - **Self-hosting is now a first-class path: a remote HTTP MCP endpoint, a browser manager, and a one-line installer.** Gemdex was previously "local LanceDB, plus a bring-your-own-infrastructure backend if you're determined". It is now a stack you can stand up in one command and, if you want, expose to the internet safely.
   - **`gemdex-mcp-http`** — a Streamable HTTP MCP surface (FastMCP v4) at `/mcp` so agents on any machine can reach your memory layer without a local Gemini key or a local install. Auth is OAuth 2.1 with Google, narrowed to **exactly one** account: `SingleUserGoogleProvider.verify_token` re-checks the verified, `email_verified` identity against `GEMDEX_ALLOWED_EMAIL` on **every request**, so an already-issued token cannot outlive a change to the allowlist. A static shared-bearer mode remains for loopback/LAN use.

@@ -14,8 +14,8 @@ from .conftest import FakeByoi, make_config, make_memory
 EXPECTED_TOOLS = [
     "save_memory",
     "recall",
+    "get_memory",
     "update_memory",
-    "list_memories",
     "report_outcome",
     "read_attachment",
 ]
@@ -38,18 +38,33 @@ async def test_required_fields_match_the_stdio_schemas(client: Client) -> None:
     async with client:
         schemas = {tool.name: tool.input_schema for tool in await client.list_tools()}
     assert schemas["save_memory"].get("required") in (None, [])
-    assert schemas["recall"].get("required") in (None, [])
-    assert schemas["list_memories"].get("required") in (None, [])
+    assert schemas["recall"]["required"] == ["query"]
+    assert schemas["get_memory"]["required"] == ["id"]
     assert schemas["update_memory"]["required"] == ["id"]
     assert sorted(schemas["report_outcome"]["required"]) == ["id", "outcome"]
     assert schemas["read_attachment"]["required"] == ["memory_id"]
+    assert "list_memories" not in schemas
+    assert "limit" not in schemas["recall"].get("properties", {})
+    assert "detail" not in schemas["recall"].get("properties", {})
+    assert "attachments" not in schemas["recall"].get("properties", {})
 
 
-async def test_recall_over_mcp_returns_rendered_text(client: Client, byoi: FakeByoi) -> None:
+async def test_recall_over_mcp_returns_title_index(client: Client, byoi: FakeByoi) -> None:
     byoi.recall_results = [{**make_memory(), "score": 0.25}]
     async with client:
         result = await client.call_tool("recall", {"query": "deploy"})
-    assert 'Recalled 1 memory for "deploy":' in result.content[0].text
+    text = result.content[0].text
+    assert 'Recalled 1 memory for "deploy"' in text
+    assert "titles only" in text
+    assert "id: mem-1" in text
+    assert make_memory()["content"] not in text
+
+
+async def test_get_memory_over_mcp_returns_full_body(client: Client, byoi: FakeByoi) -> None:
+    byoi.get_result = make_memory(content="full body for get_memory")
+    async with client:
+        result = await client.call_tool("get_memory", {"id": "mem-1"})
+    assert "full body for get_memory" in result.content[0].text
 
 
 async def test_tool_error_is_reported_not_raised_as_crash(client: Client) -> None:

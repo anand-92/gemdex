@@ -238,11 +238,14 @@ function makeRecallHit(over: Partial<MemoryRecallResult>): MemoryRecallResult {
     };
 }
 
-test('recall surfaces relative age and attachment lines', async () => {
+test('recall returns titles + ids only — never the body', async () => {
     const { statsStore, cleanup } = makeStatsStore();
     const backend = new FakeBackend(null);
+    const longBody = 'the full content body that must not leak into the title index';
     backend.recallResults = [
         makeRecallHit({
+            title: 'Login flow playbook',
+            content: longBody,
             updatedAt: Date.now() - 3 * 24 * 60 * 60 * 1000,
             attachments: [{ id: '0', kind: 'image', mimeType: 'image/png', byteLength: 10, caption: 'login bug' }],
         }),
@@ -250,89 +253,78 @@ test('recall surfaces relative age and attachment lines', async () => {
     const handlers = new MemoryToolHandlers(backend, statsStore);
 
     const result = await handlers.handleRecall({ query: 'login' });
+    const text = result.content[0].text;
 
     assert.equal(result.isError, undefined);
-    assert.match(result.content[0].text, /updated: 3d ago/);
-    assert.match(result.content[0].text, /attachments: image \(id 0: "login bug"\)/);
-    assert.match(result.content[0].text, /the full content body/);
+    assert.match(text, /Login flow playbook/);
+    assert.match(text, /id: mem-1/);
+    assert.match(text, /titles only/);
+    assert.ok(!text.includes(longBody), 'body must never appear in recall output');
+    assert.ok(!text.includes('updated:'), 'age is not part of the title index');
+    assert.ok(!text.includes('attachments:'), 'attachment details are not part of the title index');
+    assert.ok(!text.includes('Scores:'), 'score lines are not part of the title index');
     cleanup();
 });
 
-test('recall detail=summary returns a preview, not full content', async () => {
+test('recall requires a non-empty query', async () => {
     const { statsStore, cleanup } = makeStatsStore();
-    const backend = new FakeBackend(null);
-    const longBody = 'x'.repeat(500);
-    backend.recallResults = [makeRecallHit({ content: longBody })];
-    const handlers = new MemoryToolHandlers(backend, statsStore);
+    const handlers = new MemoryToolHandlers(new FakeBackend(null), statsStore);
 
-    const result = await handlers.handleRecall({ query: 'anything', detail: 'summary' });
+    const missing = await handlers.handleRecall({});
+    assert.equal(missing.isError, true);
+    assert.match(missing.content[0].text, /'query' is required/);
 
-    assert.equal(result.isError, undefined);
-    assert.match(result.content[0].text, /summary mode/);
-    assert.match(result.content[0].text, /…/);
-    assert.ok(!result.content[0].text.includes(longBody), 'full body must not appear in summary mode');
+    const blank = await handlers.handleRecall({ query: '   ' });
+    assert.equal(blank.isError, true);
+    assert.match(blank.content[0].text, /'query' is required/);
     cleanup();
 });
 
-test('list_memories renders summaries newest-first with age and media counts', async () => {
+test('get_memory returns full body, age, attachments, and bumps recall stats', async () => {
     const { statsStore, cleanup } = makeStatsStore();
-    const backend = new FakeBackend(null);
-    backend.listResults = [
-        {
-            id: 'mem-a',
-            title: 'Deploy playbook',
-            preview: 'how we deploy the service',
-            attachments: [{ id: '0', kind: 'image', mimeType: 'image/png', byteLength: 1 }],
-            createdAt: 1,
-            updatedAt: Date.now(),
-        },
-        {
-            id: 'mem-b',
-            title: 'Signing credentials',
-            preview: 'notarization steps',
-            attachments: [],
-            createdAt: 1,
-            updatedAt: Date.now() - 60 * 1000,
-        },
-    ];
+    const memory: Memory = {
+        id: 'mem-1',
+        title: 'Login flow playbook',
+        content: 'the full content body',
+        attachments: [{ id: '0', kind: 'image', mimeType: 'image/png', byteLength: 10, caption: 'login bug' }],
+        createdAt: 1,
+        updatedAt: Date.now() - 3 * 24 * 60 * 60 * 1000,
+    };
+    const backend = new FakeBackend(memory);
     const handlers = new MemoryToolHandlers(backend, statsStore);
 
-    const result = await handlers.handleListMemories({});
+    const result = await handlers.handleGetMemory({ id: 'mem-1' });
+    const text = result.content[0].text;
 
     assert.equal(result.isError, undefined);
-    assert.match(result.content[0].text, /2 memories/);
-    assert.match(result.content[0].text, /Deploy playbook/);
-    assert.match(result.content[0].text, /id: mem-a/);
-    assert.match(result.content[0].text, /1 image/);
+    assert.match(text, /^Login flow playbook/m);
+    assert.match(text, /id: mem-1/);
+    assert.match(text, /updated: 3d ago/);
+    assert.match(text, /attachments: image \(id 0: "login bug"\)/);
+    assert.match(text, /the full content body/);
+    assert.equal(statsStore.get('mem-1')?.recallCount, 1);
     cleanup();
 });
 
-test('list_memories filter is a case-insensitive substring over title + preview', async () => {
+test('get_memory returns not-found for an unknown id and does not bump stats', async () => {
     const { statsStore, cleanup } = makeStatsStore();
-    const backend = new FakeBackend(null);
-    backend.listResults = [
-        { id: 'mem-a', title: 'Deploy playbook', preview: 'service rollout', attachments: [], createdAt: 1, updatedAt: 2 },
-        { id: 'mem-b', title: 'Signing credentials', preview: 'notarization', attachments: [], createdAt: 1, updatedAt: 1 },
-    ];
-    const handlers = new MemoryToolHandlers(backend, statsStore);
+    const handlers = new MemoryToolHandlers(new FakeBackend(null), statsStore);
 
-    const result = await handlers.handleListMemories({ filter: 'DEPLOY' });
+    const result = await handlers.handleGetMemory({ id: 'missing' });
 
-    assert.equal(result.isError, undefined);
-    assert.match(result.content[0].text, /Deploy playbook/);
-    assert.ok(!result.content[0].text.includes('Signing credentials'));
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /Memory not found: missing/);
+    assert.equal(statsStore.get('missing'), undefined);
     cleanup();
 });
 
-test('list_memories reports an empty store cleanly', async () => {
+test('get_memory requires an id', async () => {
     const { statsStore, cleanup } = makeStatsStore();
-    const backend = new FakeBackend(null);
-    const handlers = new MemoryToolHandlers(backend, statsStore);
+    const handlers = new MemoryToolHandlers(new FakeBackend(null), statsStore);
 
-    const result = await handlers.handleListMemories({});
-
-    assert.equal(result.isError, undefined);
-    assert.match(result.content[0].text, /Nothing stored yet/);
+    const result = await handlers.handleGetMemory({});
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /'id' is required/);
     cleanup();
 });
 
@@ -570,54 +562,55 @@ test('report_outcome caps an overlong note at 500 characters', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// recall: recallCount bump + track-record line rendering
+// recall title index: no stats bump; track-record line when stats already exist
 // ---------------------------------------------------------------------------
 
-test('recall bumps recallCount for every returned id', async () => {
+test('recall does not bump recallCount (only get_memory does)', async () => {
     const { statsStore, cleanup } = makeStatsStore();
     const backend = new FakeBackend(null);
     backend.recallResults = [makeRecallHit({ id: 'mem-1' }), makeRecallHit({ id: 'mem-2' })];
     const handlers = new MemoryToolHandlers(backend, statsStore);
 
     await handlers.handleRecall({ query: 'anything' });
-
-    assert.equal(statsStore.get('mem-1')?.recallCount, 1);
-    assert.equal(statsStore.get('mem-2')?.recallCount, 1);
-
     await handlers.handleRecall({ query: 'anything again' });
-    assert.equal(statsStore.get('mem-1')?.recallCount, 2);
+
+    assert.equal(statsStore.get('mem-1'), undefined);
+    assert.equal(statsStore.get('mem-2'), undefined);
     cleanup();
 });
 
-test('recall never breaks when the stats store throws on read or write', async () => {
+test('recall never breaks when the stats store throws on read', async () => {
     const backend = new FakeBackend(null);
-    backend.recallResults = [makeRecallHit({ id: 'mem-1' })];
+    backend.recallResults = [makeRecallHit({ id: 'mem-1', title: 'Survives stats failure' })];
     const handlers = new MemoryToolHandlers(backend, new ThrowingStatsStore());
 
     const result = await handlers.handleRecall({ query: 'anything' });
 
     assert.equal(result.isError, undefined);
-    assert.match(result.content[0].text, /the full content body/);
+    assert.match(result.content[0].text, /Survives stats failure/);
+    assert.ok(!result.content[0].text.includes('the full content body'));
+});
+
+test('get_memory never breaks when the stats store throws on write', async () => {
+    const backend = new FakeBackend(makeMemory('full body still returned'));
+    const handlers = new MemoryToolHandlers(backend, new ThrowingStatsStore());
+
+    const result = await handlers.handleGetMemory({ id: 'mem-1' });
+
+    assert.equal(result.isError, undefined);
+    assert.match(result.content[0].text, /full body still returned/);
 });
 
 test('recall track-record line is absent when no stats exist for a hit', async () => {
     const { statsStore, cleanup } = makeStatsStore();
     const backend = new FakeBackend(null);
-    backend.recallResults = [makeRecallHit({ id: 'never-recalled-before' })];
-    // Seed stats for a DIFFERENT id so the store file exists but has nothing
-    // for this hit — the line must still be absent on first surfacing... but
-    // handleRecall itself bumps recallCount before rendering, so assert the
-    // pre-recall absence via a separate handler call is not meaningful here;
-    // instead verify a genuinely untracked memory shows no line by checking
-    // the rendered text has no non-zero-count phrasing beyond "recalled 1×".
+    backend.recallResults = [makeRecallHit({ id: 'never-opened-before', title: 'Fresh hit' })];
     const handlers = new MemoryToolHandlers(backend, statsStore);
 
     const result = await handlers.handleRecall({ query: 'anything' });
 
-    // First-ever recall: recordRecall runs BEFORE rendering, so this hit now
-    // has recallCount=1 and DOES show a line — this documents that ordering.
-    assert.match(result.content[0].text, /track record: recalled 1×/);
-    assert.ok(!result.content[0].text.includes('⚠'), 'no warning prefix with zero failed/stale');
+    assert.match(result.content[0].text, /Fresh hit/);
+    assert.ok(!result.content[0].text.includes('track record'), 'no track-record line without prior stats');
     cleanup();
 });
 
@@ -633,13 +626,13 @@ test('recall track-record line shows non-zero tallies and the last-outcome age',
     statsStore.recordRecall(['mem-1']);
     statsStore.recordRecall(['mem-1']);
     statsStore.recordRecall(['mem-1']);
+    statsStore.recordRecall(['mem-1']);
     statsStore.recordOutcome('mem-1', 'worked', undefined, Date.now() - 2 * 24 * 60 * 60 * 1000);
     statsStore.recordOutcome('mem-1', 'worked', undefined, Date.now() - 2 * 24 * 60 * 60 * 1000);
     statsStore.recordOutcome('mem-1', 'worked', undefined, Date.now() - 2 * 24 * 60 * 60 * 1000);
 
     const result = await handlers.handleRecall({ query: 'anything' });
 
-    // 6 prior + this call's own bump = 7.
     assert.match(result.content[0].text, /track record: recalled 7×, worked 3× \(last: worked 2d ago\)/);
     assert.ok(!result.content[0].text.includes('⚠'));
     cleanup();
@@ -651,7 +644,7 @@ test('recall track-record line shows the ⚠ prefix and always includes failed/s
     backend.recallResults = [makeRecallHit({ id: 'mem-1' })];
     const handlers = new MemoryToolHandlers(backend, statsStore);
 
-    for (let i = 0; i < 8; i++) statsStore.recordRecall(['mem-1']);
+    for (let i = 0; i < 9; i++) statsStore.recordRecall(['mem-1']);
     statsStore.recordOutcome('mem-1', 'worked');
     statsStore.recordOutcome('mem-1', 'failed', undefined, Date.now() - 4 * 60 * 60 * 1000);
     statsStore.recordOutcome('mem-1', 'failed', undefined, Date.now() - 4 * 60 * 60 * 1000);
@@ -679,15 +672,15 @@ function withEnv<T>(name: string, value: string | undefined, fn: () => T): T {
     }
 }
 
-test('trust ranking OFF (default): result order and requested limit are unchanged from backend order', async () => {
+test('trust ranking OFF (default): result order and fixed limit are unchanged from backend order', async () => {
     const { statsStore, cleanup } = makeStatsStore();
     const backend = new FakeBackend(null);
     let requestedLimit: number | undefined;
     backend.recall = async (_q, limit) => {
         requestedLimit = limit;
         return [
-            makeRecallHit({ id: 'clean', score: 0.5 }),
-            makeRecallHit({ id: 'burned', score: 0.49 }),
+            makeRecallHit({ id: 'clean', title: 'Clean', score: 0.5 }),
+            makeRecallHit({ id: 'burned', title: 'Burned', score: 0.49 }),
         ];
     };
     // Give 'burned' a terrible track record — must NOT affect order while off.
@@ -698,11 +691,9 @@ test('trust ranking OFF (default): result order and requested limit are unchange
     const handlers = new MemoryToolHandlers(backend, statsStore);
 
     await withEnv('GEMDEX_TRUST_RANKING', undefined, async () => {
-        const result = await handlers.handleRecall({ query: 'q', limit: 5 });
+        const result = await handlers.handleRecall({ query: 'q' });
         const text = result.content[0].text;
-        assert.equal(requestedLimit, 5, 'no over-fetch when the flag is off');
-        assert.ok(text.indexOf('### 1. Note') < text.indexOf('### 2. Note') || text.split('### 1.').length === 2);
-        // 'clean' (higher raw score) must still render first.
+        assert.equal(requestedLimit, 10, 'no over-fetch when the flag is off; fixed N=10');
         const cleanIndex = text.indexOf('id: clean');
         const burnedIndex = text.indexOf('id: burned');
         assert.ok(cleanIndex > -1 && burnedIndex > -1 && cleanIndex < burnedIndex);
@@ -719,8 +710,8 @@ test('trust ranking ON: a high-failed memory drops below a clean one with a slig
         requestedLimit = limit;
         return [
             // 'burned' ranks first by raw score...
-            makeRecallHit({ id: 'burned', score: 0.52 }),
-            makeRecallHit({ id: 'clean', score: 0.50 }),
+            makeRecallHit({ id: 'burned', title: 'Burned', score: 0.52 }),
+            makeRecallHit({ id: 'clean', title: 'Clean', score: 0.50 }),
         ];
     };
     // 'burned': failed 5x, stale 2x -> penalty = 1 + 0.20*ln(8) ≈ 1.416 -> trust ≈ 0.706.
@@ -730,52 +721,33 @@ test('trust ranking ON: a high-failed memory drops below a clean one with a slig
     const handlers = new MemoryToolHandlers(backend, statsStore);
 
     const result = await withEnv('GEMDEX_TRUST_RANKING', 'true', () =>
-        handlers.handleRecall({ query: 'q', limit: 2 }));
+        handlers.handleRecall({ query: 'q' }));
 
-    // Over-fetch: min(max(2*2, 2+5), 100) = min(7,100) = 7.
-    assert.equal(requestedLimit, 7);
+    // Over-fetch: min(max(10*2, 10+5), 100) = 20.
+    assert.equal(requestedLimit, 20);
     const text = result.content[0].text;
     const cleanIndex = text.indexOf('id: clean');
     const burnedIndex = text.indexOf('id: burned');
     assert.ok(cleanIndex > -1 && burnedIndex > -1 && cleanIndex < burnedIndex, 'clean must now rank above burned');
-    assert.match(text, /trust=×0\.7\d/);
+    // Title index does not render the trust factor line — only order changes.
+    assert.ok(!text.includes('trust=×'));
     cleanup();
 });
 
-test('trust ranking ON still over-fetches at the tool\'s max limit (50), not capped down to it', async () => {
-    const { statsStore, cleanup } = makeStatsStore();
-    const backend = new FakeBackend(null);
-    let requestedLimit: number | undefined;
-    backend.recall = async (_q, limit) => {
-        requestedLimit = limit;
-        return [makeRecallHit({ id: 'a', score: 0.5 })];
-    };
-    const handlers = new MemoryToolHandlers(backend, statsStore);
-
-    await withEnv('GEMDEX_TRUST_RANKING', 'true', async () => {
-        // limit is clamped to 50 by handleRecall itself; over-fetch must still
-        // reach past it (min(max(50*2, 50+5), 100) = 100), not collapse to 50.
-        await handlers.handleRecall({ query: 'q', limit: 999 });
-        assert.equal(requestedLimit, 100, 'over-fetch cap must stay above the max requestable limit');
-    });
-    cleanup();
-});
-
-test('trust ranking ON with no stats anywhere leaves relative order unchanged (trust=1 for all)', async () => {
+test('trust ranking ON with no stats anywhere leaves relative order unchanged', async () => {
     const { statsStore, cleanup } = makeStatsStore();
     const backend = new FakeBackend(null);
     backend.recall = async () => [
-        makeRecallHit({ id: 'a', score: 0.9 }),
-        makeRecallHit({ id: 'b', score: 0.5 }),
+        makeRecallHit({ id: 'a', title: 'A', score: 0.9 }),
+        makeRecallHit({ id: 'b', title: 'B', score: 0.5 }),
     ];
     const handlers = new MemoryToolHandlers(backend, statsStore);
 
     const result = await withEnv('GEMDEX_TRUST_RANKING', 'true', () =>
-        handlers.handleRecall({ query: 'q', limit: 10 }));
+        handlers.handleRecall({ query: 'q' }));
 
     const text = result.content[0].text;
     assert.ok(text.indexOf('id: a') < text.indexOf('id: b'));
-    assert.match(text, /trust=×1\.00/);
     cleanup();
 });
 
@@ -790,7 +762,7 @@ test('trust ranking treats an unparseable flag value as off (fail-fast-off, not 
     const handlers = new MemoryToolHandlers(backend, statsStore);
 
     await withEnv('GEMDEX_TRUST_RANKING', 'yes-please', async () => {
-        await handlers.handleRecall({ query: 'q', limit: 10 });
+        await handlers.handleRecall({ query: 'q' });
         assert.equal(requestedLimit, 10, 'garbage value must not trigger over-fetch');
     });
     cleanup();

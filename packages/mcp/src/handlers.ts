@@ -100,19 +100,13 @@ function parseEdits(value: unknown): ParsedEdits {
     return { edits };
 }
 
-const PREVIEW_LENGTH = 200;
-
-/** Collapse whitespace and truncate content to a short, single-line preview. */
-function makePreview(content: string, length = PREVIEW_LENGTH): string {
-    const collapsed = (content ?? '').replace(/\s+/g, ' ').trim();
-    if (collapsed.length <= length) return collapsed;
-    return collapsed.slice(0, length).trimEnd() + '…';
-}
+/** Fixed top-N for the title-index `recall` tool. No agent-facing limit param. */
+export const RECALL_FIXED_LIMIT = 10;
 
 /**
  * Render an epoch-millisecond timestamp as a compact relative age
  * ("just now", "5m ago", "3d ago", "2y ago") so the agent can judge how
- * fresh a recalled memory is. Future timestamps (clock skew) read "just now".
+ * fresh a memory is. Future timestamps (clock skew) read "just now".
  */
 function formatRelativeAge(timestamp: number, now: number = Date.now()): string {
     const diffMs = now - timestamp;
@@ -131,12 +125,9 @@ function formatRelativeAge(timestamp: number, now: number = Date.now()): string 
 }
 
 /**
- * Per-hit track-record line beneath a recall result, rendered whenever stats
- * exist for that memory (always-on, purely additive — absent for untracked
- * memories, so backward compatibility with no stats recorded holds byte for
- * byte). Only non-zero tallies are shown, EXCEPT that `failed`/`stale` are
- * always both shown together once either is non-zero, prefixed with `⚠` as an
- * at-a-glance warning that this memory has burned the agent before:
+ * Per-hit track-record line rendered whenever stats exist for that memory.
+ * Only non-zero tallies are shown, EXCEPT that `failed`/`stale` are always
+ * both shown together once either is non-zero, prefixed with `⚠`:
  *
  *   track record: recalled 7×, worked 3× (last: worked 2d ago)
  *   ⚠ track record: recalled 9×, worked 1×, failed 3× (last: failed 4h ago)
@@ -164,7 +155,6 @@ function formatTrackRecordLine(stats: MemoryStats | undefined, now: number = Dat
  * Boosts memories with a strong `worked` history, demotes ones that have
  * burned the agent (`failed`/`stale`), and is exactly 1 — a no-op — for a
  * memory with no stats, so untracked memories keep their relative order.
- * Deterministic and documented here rather than tuned empirically:
  *
  *   trust = clamp( (1 + 0.08·ln(1+worked)) / (1 + 0.20·ln(1+failed+stale)), 0.6, 1.4 )
  */
@@ -176,9 +166,9 @@ function trustMultiplier(stats: MemoryStats | undefined): number {
 }
 
 /**
- * Per-hit attachment line for recall output. Surfaces each attachment's kind,
- * stable id, and caption so the agent knows media exists and can reason about
- * it (the caption is the human-written description). Returns null when none.
+ * Per-hit attachment line for full-memory output (`get_memory`). Surfaces
+ * each attachment's kind, stable id, and caption so the agent knows media
+ * exists and can fetch bytes via `read_attachment`. Returns null when none.
  */
 function formatAttachmentsLine(
     attachments: { id: string; kind: string; caption?: string }[] | undefined,
@@ -189,48 +179,6 @@ function formatAttachmentsLine(
         return `${a.kind} (id ${a.id}${caption})`;
     });
     return `attachments: ${parts.join(', ')}`;
-}
-
-/** Compact attachment summary for list output, e.g. ` · 1 image, 1 pdf`. */
-function formatAttachmentCounts(
-    attachments: { kind: string }[] | undefined,
-): string {
-    if (!attachments || attachments.length === 0) return '';
-    const counts = new Map<string, number>();
-    for (const a of attachments) counts.set(a.kind, (counts.get(a.kind) ?? 0) + 1);
-    const parts = Array.from(counts.entries()).map(([kind, n]) => `${n} ${kind}${n > 1 ? 's' : ''}`);
-    return ` · ${parts.join(', ')}`;
-}
-
-/** Render one fused-search branch, e.g. `dense=#3 (d=0.1234)` or `bm25=—`. */
-function formatScoreBranch(label: string, rank: number | undefined, detail: string): string {
-    if (rank === undefined) return `${label}=—`;
-    return `${label}=#${rank}${detail}`;
-}
-
-/**
- * Render the per-branch sub-score line shown beneath each recall hit so the
- * agent can gauge confidence (mirrors the old code-search format).
- * `fusedScore` is always the raw relevance score (pre-trust-adjustment) so
- * the agent can see both the underlying relevance AND the trust multiplier
- * that was layered on top of it; `trust` is omitted entirely when
- * `GEMDEX_TRUST_RANKING` is off, matching the flag's byte-identical-when-off
- * backward-compatibility requirement.
- */
-function formatSubScoresLine(fusedScore: number, subScores?: {
-    denseRank?: number;
-    denseDistance?: number;
-    ftsRank?: number;
-    ftsScore?: number;
-}, trust?: number): string {
-    const fused = `fused=${fusedScore.toFixed(4)}`;
-    const trustPart = trust !== undefined ? ` · trust=×${trust.toFixed(2)}` : '';
-    if (!subScores) return `Scores: ${fused}${trustPart}`;
-    const denseDetail = subScores.denseDistance !== undefined ? ` (d=${subScores.denseDistance.toFixed(4)})` : '';
-    const ftsDetail = subScores.ftsScore !== undefined ? ` (s=${subScores.ftsScore.toFixed(2)})` : '';
-    const dense = formatScoreBranch('dense', subScores.denseRank, denseDetail);
-    const bm25 = formatScoreBranch('bm25', subScores.ftsRank, ftsDetail);
-    return `Scores: ${fused}${trustPart} · ${dense} · ${bm25}`;
 }
 
 /** Render the confirmation block returned to the agent after a save/update. */
@@ -296,68 +244,89 @@ export class MemoryToolHandlers {
         }
     }
 
+    /**
+     * Title-index search. Always returns up to RECALL_FIXED_LIMIT ranked hits
+     * as title + id (+ track-record when stats exist). Never returns bodies —
+     * agents open a specific hit with `get_memory`. Does not bump recall
+     * stats; opening the body via `get_memory` is what counts as a recall.
+     */
     async handleRecall(args: any): Promise<ToolResult> {
-        const query = typeof args?.query === 'string' ? args.query : '';
-        const limit = typeof args?.limit === 'number' && args.limit > 0 ? Math.min(args.limit, 50) : 10;
-        const summaryOnly = args?.detail === 'summary';
-        const parsed = parseAttachments(args?.attachments);
-        if ('error' in parsed) return parsed.error;
-        const attachments = parsed.attachments;
-        const hasAttachments = (attachments?.length ?? 0) > 0;
-        if (query.trim().length === 0 && !hasAttachments) {
-            return textResult("Error: provide 'query' or at least one attachment.", true);
+        const query = typeof args?.query === 'string' ? args.query.trim() : '';
+        if (query.length === 0) {
+            return textResult("Error: 'query' is required.", true);
         }
-        const label = query.trim().length > 0 ? `"${query}"` : 'the supplied media';
+        const label = `"${query}"`;
         // Read once per call: an unparseable/missing value is simply "not
         // 'true'" => off, so ranking stays byte-identical to backend order
-        // whenever the flag is unset (no-silent-behavior-change).
+        // whenever the flag is unset.
         const trustRankingEnabled = (envManager.get('GEMDEX_TRUST_RANKING') ?? '').toLowerCase() === 'true';
         try {
-            const resolved = hasAttachments ? await resolveAttachmentInputs(attachments!) : undefined;
-            // Flag off: fetch exactly `limit`, no re-rank — identical to prior
-            // behavior. Flag on: over-fetch so re-ranking has room to promote a
-            // proven memory or demote a burned one past the raw-relevance cutoff.
-            // Cap at 100 (well above the tool's own 50 max `limit`) so
-            // over-fetching still has room to work even at the top of the range.
-            const fetchLimit = trustRankingEnabled ? Math.min(Math.max(limit * 2, limit + 5), 100) : limit;
-            const fetched = await this.store.recall(query, fetchLimit, resolved);
-            const results = trustRankingEnabled ? this.applyTrustRanking(fetched).slice(0, limit) : fetched;
+            // Flag off: fetch exactly N. Flag on: over-fetch so re-ranking has
+            // room to promote/demote past the raw-relevance cutoff.
+            const fetchLimit = trustRankingEnabled
+                ? Math.min(Math.max(RECALL_FIXED_LIMIT * 2, RECALL_FIXED_LIMIT + 5), 100)
+                : RECALL_FIXED_LIMIT;
+            const fetched = await this.store.recall(query, fetchLimit);
+            const results = trustRankingEnabled
+                ? this.applyTrustRanking(fetched).slice(0, RECALL_FIXED_LIMIT)
+                : fetched;
             if (results.length === 0) {
                 return textResult(`No memories matched ${label}. Nothing stored yet, or no relevant match.`);
             }
 
+            const now = Date.now();
+            const blocks = results.map((r, i) => {
+                const lines = [
+                    `${i + 1}. ${r.title}`,
+                    `   id: ${r.id}`,
+                ];
+                const trackRecordLine = formatTrackRecordLine(this.safeGetStats(r.id), now);
+                if (trackRecordLine) lines.push(`   ${trackRecordLine}`);
+                return lines.join('\n');
+            });
+            const header = `Recalled ${results.length} ${results.length === 1 ? 'memory' : 'memories'} for ${label} (titles only — call get_memory with an id to open full content):\n`;
+            return textResult(header + '\n' + blocks.join('\n\n'));
+        } catch (error) {
+            return textResult(`Failed to recall memories: ${errorMessage(error)}`, true);
+        }
+    }
+
+    /**
+     * Load one full parent memory by id. This is the only MCP path that
+     * returns body text. Bumps per-client recall stats on success (best-effort).
+     */
+    async handleGetMemory(args: any): Promise<ToolResult> {
+        const id = typeof args?.id === 'string' ? args.id.trim() : '';
+        if (id.length === 0) {
+            return textResult("Error: 'id' is required.", true);
+        }
+        try {
+            const memory = await this.store.get(id);
+            if (!memory) {
+                return textResult(`Failed to get memory: Memory not found: ${id}`, true);
+            }
+
             try {
-                this.statsStore.recordRecall(results.map((r) => r.id));
+                this.statsStore.recordRecall([id]);
             } catch (error) {
-                // Telemetry only — a stats-store failure must never break recall.
+                // Telemetry only — a stats-store failure must never break get_memory.
                 console.error('Failed to record recall stats:', errorMessage(error));
             }
 
             const now = Date.now();
-            const blocks = results.map((r, i) => {
-                const stats = this.safeGetStats(r.id);
-                const trust = trustRankingEnabled ? trustMultiplier(stats) : undefined;
-                const scoreLine = formatSubScoresLine(r.score, r.subScores, trust);
-                const lines = [
-                    `### ${i + 1}. ${r.title}`,
-                    `id: ${r.id}`,
-                    `updated: ${formatRelativeAge(r.updatedAt, now)}`,
-                    scoreLine,
-                ];
-                const trackRecordLine = formatTrackRecordLine(stats, now);
-                if (trackRecordLine) lines.push(trackRecordLine);
-                const attachmentsLine = formatAttachmentsLine(r.attachments);
-                if (attachmentsLine) lines.push(attachmentsLine);
-                lines.push('', summaryOnly ? makePreview(r.content) : r.content);
-                return lines.join('\n');
-            });
-            const detailNote = summaryOnly
-                ? ' (summary mode — re-run recall with a tighter query or detail:"full" for complete content)'
-                : '';
-            const header = `Recalled ${results.length} ${results.length === 1 ? 'memory' : 'memories'} for ${label}${detailNote}:\n`;
-            return textResult(header + '\n' + blocks.join('\n\n---\n\n'));
+            const lines = [
+                memory.title,
+                `id: ${memory.id}`,
+                `updated: ${formatRelativeAge(memory.updatedAt, now)}`,
+            ];
+            const trackRecordLine = formatTrackRecordLine(this.safeGetStats(id), now);
+            if (trackRecordLine) lines.push(trackRecordLine);
+            const attachmentsLine = formatAttachmentsLine(memory.attachments);
+            if (attachmentsLine) lines.push(attachmentsLine);
+            lines.push('', memory.content);
+            return textResult(lines.join('\n'));
         } catch (error) {
-            return textResult(`Failed to recall memories: ${errorMessage(error)}`, true);
+            return textResult(`Failed to get memory: ${errorMessage(error)}`, true);
         }
     }
 
@@ -376,9 +345,9 @@ export class MemoryToolHandlers {
 
     /**
      * `MemoryStatsStore.get` reads a file on every call; a stats-store
-     * failure anywhere in `recall` rendering (track-record line, trust
-     * ranking) must degrade to "no stats" rather than break the whole
-     * recall — telemetry is never allowed to be a single point of failure.
+     * failure anywhere in rendering (track-record line, trust ranking) must
+     * degrade to "no stats" rather than break the tool — telemetry is never
+     * allowed to be a single point of failure.
      */
     private safeGetStats(id: string): MemoryStats | undefined {
         try {
@@ -386,38 +355,6 @@ export class MemoryToolHandlers {
         } catch (error) {
             console.error('Failed to read recall stats:', errorMessage(error));
             return undefined;
-        }
-    }
-
-    async handleListMemories(args: any): Promise<ToolResult> {
-        const rawLimit = typeof args?.limit === 'number' && args.limit > 0 ? Math.floor(args.limit) : 50;
-        const limit = Math.min(rawLimit, 200);
-        const filter = typeof args?.filter === 'string' ? args.filter.trim().toLowerCase() : '';
-        try {
-            const all = await this.store.list();
-            const matched = filter.length > 0
-                ? all.filter((m) =>
-                    m.title.toLowerCase().includes(filter) || m.preview.toLowerCase().includes(filter))
-                : all;
-            if (matched.length === 0) {
-                const scope = filter.length > 0 ? ` matching "${filter}"` : '';
-                return textResult(`No memories${scope}. ${all.length === 0 ? 'Nothing stored yet.' : 'Try a different filter or recall with a natural-language query.'}`);
-            }
-            const shown = matched.slice(0, limit);
-            const now = Date.now();
-            const lines = shown.map((m, i) => {
-                const age = formatRelativeAge(m.updatedAt, now);
-                const media = formatAttachmentCounts(m.attachments);
-                return `${i + 1}. ${m.title}\n   id: ${m.id} · updated ${age}${media}\n   ${m.preview}`;
-            });
-            const filterNote = filter.length > 0 ? ` matching "${filter}"` : '';
-            const truncated = matched.length > shown.length
-                ? `\n\n(${matched.length - shown.length} more not shown — raise 'limit' or narrow 'filter')`
-                : '';
-            const header = `${matched.length} ${matched.length === 1 ? 'memory' : 'memories'}${filterNote} (newest first):\n`;
-            return textResult(header + '\n' + lines.join('\n\n') + truncated);
-        } catch (error) {
-            return textResult(`Failed to list memories: ${errorMessage(error)}`, true);
         }
     }
 
